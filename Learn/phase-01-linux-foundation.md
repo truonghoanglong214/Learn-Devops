@@ -672,9 +672,9 @@ WorkingDirectory=/app/shoplite/current
 EnvironmentFile=/app/shoplite/shared/.env
 
 # Lệnh khởi động
-ExecStart=/usr/bin/node /app/shoplite/current/server.js
-# Với Python:
-# ExecStart=/usr/bin/python3 /app/shoplite/current/main.py
+ExecStart=/usr/bin/dotnet /app/shoplite/current/ShopLite.dll
+# Development mode:
+# ExecStart=dotnet run --project /app/shoplite/current/ShopLite.csproj
 
 # Lệnh reload (optional — nếu app hỗ trợ graceful reload)
 ExecReload=/bin/kill -HUP $MAINPID

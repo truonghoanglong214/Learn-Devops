@@ -230,7 +230,7 @@ File cấu hình hoàn chỉnh cho dự án ShopLite chạy trong Docker Compose
 ```nginx
 # =============================================================================
 # nginx.conf - Cấu hình Nginx cho ShopLite
-# Architecture: Nginx (reverse proxy) -> Frontend (React) + Backend (Node.js)
+# Architecture: Nginx (reverse proxy) -> Frontend (React) + Backend (ASP.NET Core)
 # =============================================================================
 
 # ---- Main Context ----
@@ -299,17 +299,17 @@ http {
         least_conn;
 
         # Server entries
-        server backend:3000;            # Service name trong Docker Compose
+        server backend:8080;            # Service name trong Docker Compose
 
         # Với nhiều instances (load balancing):
-        # server backend1:3000 weight=3;  # Nhận 3x traffic hơn backend2
-        # server backend2:3000 weight=1;
-        # server backend3:3000 backup;    # Chỉ dùng khi backend1 và backend2 down
+        # server backend1:8080 weight=3;  # Nhận 3x traffic hơn backend2
+        # server backend2:8080 weight=1;
+        # server backend3:8080 backup;    # Chỉ dùng khi backend1 và backend2 down
 
         # Passive health check
         # max_fails=3: sau 3 lần lỗi trong fail_timeout giây thì đánh dấu server down
         # fail_timeout=30s: thời gian đếm lỗi và thời gian server bị đánh dấu down
-        # server backend:3000 max_fails=3 fail_timeout=30s;
+        # server backend:8080 max_fails=3 fail_timeout=30s;
 
         # Connection reuse đến backend
         keepalive 32;                   # Giữ 32 persistent connections đến backend
@@ -809,7 +809,7 @@ server {
 ```nginx
 # Trong upstream block
 upstream backend {
-    server backend:3000;
+    server backend:8080;
     keepalive 32;           # Giữ 32 connections sẵn sàng trong pool
 }
 
@@ -859,39 +859,39 @@ server {
 ```nginx
 # Round Robin (mặc định) - phân phối đều theo vòng
 upstream backend_rr {
-    server backend1:3000;
-    server backend2:3000;
-    server backend3:3000;
+    server backend1:8080;
+    server backend2:8080;
+    server backend3:8080;
 }
 
 # Weighted Round Robin - backend1 nhận 3x traffic hơn backend2
 upstream backend_weighted {
-    server backend1:3000 weight=3;
-    server backend2:3000 weight=1;
+    server backend1:8080 weight=3;
+    server backend2:8080 weight=1;
 }
 
 # Least Connections - gửi request đến server ít connections nhất
 # Tốt hơn round-robin khi request có thời gian xử lý khác nhau
 upstream backend_lc {
     least_conn;
-    server backend1:3000;
-    server backend2:3000;
-    server backend3:3000;
+    server backend1:8080;
+    server backend2:8080;
+    server backend3:8080;
 }
 
 # IP Hash - cùng IP luôn được gửi đến cùng server (session persistence)
 # Cần khi application không dùng shared session store
 upstream backend_iphash {
     ip_hash;
-    server backend1:3000;
-    server backend2:3000;
+    server backend1:8080;
+    server backend2:8080;
 }
 
 # Hash by arbitrary key (Nginx Plus hoặc module)
 upstream backend_hash {
     hash $request_uri consistent;  # Consistent hashing theo URL
-    server backend1:3000;
-    server backend2:3000;
+    server backend1:8080;
+    server backend2:8080;
 }
 ```
 
@@ -900,20 +900,20 @@ upstream backend_hash {
 ```nginx
 upstream backend {
     # weight: trọng số, server nhận nhiều request hơn nếu weight cao hơn
-    server backend1:3000 weight=5;
+    server backend1:8080 weight=5;
 
     # max_fails + fail_timeout: passive health check
     # Nếu backend2 fail 3 lần trong 30s -> đánh dấu down trong 30s tiếp
-    server backend2:3000 max_fails=3 fail_timeout=30s;
+    server backend2:8080 max_fails=3 fail_timeout=30s;
 
     # backup: chỉ dùng khi tất cả server khác down
-    server backend3:3000 backup;
+    server backend3:8080 backup;
 
     # down: đánh dấu server tạm thời down (maintenance)
-    server backend4:3000 down;
+    server backend4:8080 down;
 
     # max_conns: giới hạn connections đến server này
-    server backend5:3000 max_conns=100;
+    server backend5:8080 max_conns=100;
 
     keepalive 32;
 }
@@ -925,8 +925,8 @@ Nginx Open Source chỉ hỗ trợ passive health check (kiểm tra khi có requ
 
 ```nginx
 upstream backend {
-    server backend1:3000 max_fails=3 fail_timeout=30s;
-    server backend2:3000 max_fails=3 fail_timeout=30s;
+    server backend1:8080 max_fails=3 fail_timeout=30s;
+    server backend2:8080 max_fails=3 fail_timeout=30s;
 }
 ```
 
@@ -1003,13 +1003,14 @@ services:
       - app_network
     # KHÔNG expose port ra ngoài - chỉ nginx mới cần
 
-  # Backend: Node.js API
+  # Backend: ASP.NET Core API
   backend:
     build:
       context: ./backend
     environment:
-      - NODE_ENV=production
-      - DATABASE_URL=postgresql://user:pass@db:5432/shoplite
+      - ASPNETCORE_ENVIRONMENT=Production
+      - ASPNETCORE_URLS=http://+:8080
+      - ConnectionStrings__DefaultConnection=Host=db;Port=5432;Database=shoplite;Username=user;Password=pass
     # KHÔNG expose port ra ngoài
     networks:
       - app_network
@@ -1137,7 +1138,7 @@ ss -tlnp | grep nginx
 lsof -p $(cat /var/run/nginx.pid)
 
 # Test kết nối từ trong container đến backend
-docker compose exec nginx curl -v http://backend:3000/health
+docker compose exec nginx curl -v http://backend:8080/health
 
 # Xem Nginx status (cần bật stub_status trong config)
 curl http://localhost/nginx_status

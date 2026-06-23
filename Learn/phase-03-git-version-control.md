@@ -969,26 +969,32 @@ out/
 # Nhưng COMMIT .env.example (template không có values thật)
 
 # =============================================================
-# Python (nếu có service Python)
+# .NET / C#
 # =============================================================
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-.venv/
-venv/
-ENV/
-env/
-*.egg-info/
-.eggs/
-dist/
-*.egg
-.pytest_cache/
-.coverage
-htmlcov/
-.tox/
-.mypy_cache/
+bin/
+obj/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+.vs/
+*.csproj.user
+*.dbmdl
+*.dbproj.schemaview
+# NuGet packages
+packages/
+*.nupkg
+*.snupkg
+# Publish output
+publish/
+# Entity Framework migrations snapshots (chỉ ignore nếu autogenerate)
+# Migrations/ <- KHÔNG ignore, cần commit migration files
+# Coverage
+*.coverage
+*.coveragexml
+TestResults/
+# Rider
+*.sln.iml
 
 # =============================================================
 # OS-generated files
@@ -1357,24 +1363,25 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
         with:
-          node-version: '20'
-          cache: 'npm'
-      
-      - name: Install dependencies
-        run: npm ci
-      
-      - name: Lint
-        run: npm run lint
-      
-      - name: Run tests
-        run: npm test -- --coverage
-      
+          dotnet-version: '8.0.x'
+
+      - name: Restore dependencies
+        run: dotnet restore
+
       - name: Build
-        run: npm run build
+        run: dotnet build --no-restore --configuration Release
+
+      - name: Run tests
+        run: dotnet test --no-build --configuration Release --verbosity normal --collect:"XPlat Code Coverage"
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        with:
+          files: '**/coverage.cobertura.xml'
 ```
 
 #### Tags và Releases
@@ -1431,10 +1438,10 @@ của team để giữ codebase nhất quán và chất lượng cao.
 
 ### Yêu cầu
 
-- Node.js >= 20.x
-- npm >= 10.x
+- .NET SDK 8.0+
 - Docker Desktop (cho local database)
 - Git >= 2.39
+- Visual Studio 2022 / JetBrains Rider / VS Code với C# Dev Kit extension
 
 ### Các bước setup
 
@@ -1443,32 +1450,33 @@ của team để giữ codebase nhất quán và chất lượng cao.
    git clone https://github.com/YOUR_USERNAME/shoplite.git
    cd shoplite
 
-2. Cài đặt dependencies:
+2. Restore NuGet packages:
    
-   npm install
+   dotnet restore
 
 3. Copy environment template và điền values:
    
    cp .env.example .env.local
-   # Mở .env.local và điền các giá trị cần thiết
+   # Hoặc dùng dotnet user-secrets cho development:
+   # dotnet user-secrets set "ConnectionStrings:Default" "Host=localhost;..."
 
 4. Khởi động database:
    
    docker-compose up -d postgres redis
 
-5. Chạy database migrations:
+5. Chạy database migrations (Entity Framework Core):
    
-   npm run db:migrate
+   dotnet ef database update --project src/ShopLite.Infrastructure
 
 6. Seed database với test data:
    
-   npm run db:seed
+   dotnet run --project src/ShopLite.API -- --seed
 
 7. Khởi động development server:
    
-   npm run dev
+   dotnet run --project src/ShopLite.API
 
-8. Truy cập http://localhost:3000
+8. Truy cập http://localhost:5000 hoặc https://localhost:5001
 
 ---
 
@@ -1583,9 +1591,8 @@ Migration guide: https://docs.shoplite.com/migration/v2
 ### Trước khi tạo PR
 
 - [ ] Self-review toàn bộ diff của mình
-- [ ] Tests pass: `npm test`
-- [ ] Lint pass: `npm run lint`
-- [ ] Build thành công: `npm run build`
+- [ ] Tests pass: `dotnet test`
+- [ ] Build thành công: `dotnet build --configuration Release`
 - [ ] Không có secrets hay credentials trong code
 - [ ] PR title follow Conventional Commits format
 
@@ -1644,37 +1651,43 @@ Migration guide: https://docs.shoplite.com/migration/v2
 
 ```bash
 # Chạy tất cả tests
-npm test
+dotnet test
 
-# Watch mode (auto re-run khi có thay đổi)
-npm run test:watch
+# Chỉ chạy một project test cụ thể
+dotnet test tests/ShopLite.UnitTests
 
-# Với coverage report
-npm run test:coverage
+# Với coverage report (cần coverlet.collector)
+dotnet test --collect:"XPlat Code Coverage"
 
-# Chỉ chạy tests matching pattern
-npm test -- --testPathPattern="auth"
+# Chỉ chạy tests matching filter
+dotnet test --filter "Category=Unit"
+dotnet test --filter "FullyQualifiedName~AuthService"
+
+# Verbose output
+dotnet test --verbosity detailed
 ```
 
 ### Integration Tests
 
 ```bash
-# Yêu cầu: database đang chạy
-npm run test:integration
+# Yêu cầu: database đang chạy (docker-compose up -d postgres redis)
+dotnet test tests/ShopLite.IntegrationTests
 ```
 
 ### E2E Tests
 
 ```bash
 # Yêu cầu: full application đang chạy
-npm run test:e2e
+dotnet test tests/ShopLite.E2ETests
 ```
 
 ### Viết Tests
 
-- Unit test file đặt cạnh file implementation: `auth.js` → `auth.test.js`
-- Integration tests: `tests/integration/`
-- Test naming: `describe('AuthService', () => { it('should return user when credentials valid', ...)`
+- Unit test project riêng: `tests/ShopLite.UnitTests/`
+- Integration test project: `tests/ShopLite.IntegrationTests/`
+- Test class đặt tên theo: `AuthServiceTests.cs`
+- Test method naming: `MethodName_Scenario_ExpectedBehavior` (ví dụ: `Login_WithValidCredentials_ReturnsJwtToken`)
+- Dùng xUnit + FluentAssertions + Moq (hoặc NSubstitute)
 - Coverage threshold: minimum 80% cho statements và branches
 
 ---

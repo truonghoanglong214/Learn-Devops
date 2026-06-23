@@ -325,23 +325,21 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
         with:
-          node-version: 18
-          cache: npm
-          cache-dependency-path: backend/package-lock.json
+          dotnet-version: '8.0.x'
 
-      - name: Install dependencies
-        run: npm ci
-        working-directory: ./backend
-
-      - name: Run ESLint
-        run: npm run lint
+      - name: Restore dependencies
+        run: dotnet restore
         working-directory: ./backend
 
       - name: Check formatting
-        run: npm run format:check
+        run: dotnet format --verify-no-changes
+        working-directory: ./backend
+
+      - name: Build (check for compile errors)
+        run: dotnet build --no-restore --configuration Release
         working-directory: ./backend
 
   test:
@@ -377,38 +375,36 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
         with:
-          node-version: 18
-          cache: npm
-          cache-dependency-path: backend/package-lock.json
+          dotnet-version: '8.0.x'
 
-      - name: Install dependencies
-        run: npm ci
+      - name: Restore dependencies
+        run: dotnet restore
         working-directory: ./backend
 
-      - name: Run database migrations
-        run: npm run migrate
+      - name: Run database migrations (EF Core)
+        run: dotnet ef database update
         working-directory: ./backend
         env:
-          DATABASE_URL: postgresql://shoplite:test@localhost:5432/shoplite_test
+          ConnectionStrings__DefaultConnection: "Host=localhost;Port=5432;Database=shoplite_test;Username=shoplite;Password=test"
 
-      - name: Run unit tests
-        run: npm test
+      - name: Run tests
+        run: dotnet test --no-restore --collect:"XPlat Code Coverage"
         working-directory: ./backend
         env:
-          DATABASE_URL: postgresql://shoplite:test@localhost:5432/shoplite_test
-          REDIS_URL: redis://localhost:6379
-          JWT_SECRET: test-jwt-secret-for-ci-only
-          NODE_ENV: test
+          ConnectionStrings__DefaultConnection: "Host=localhost;Port=5432;Database=shoplite_test;Username=shoplite;Password=test"
+          ConnectionStrings__Redis: "localhost:6379"
+          JwtSettings__Secret: "test-jwt-secret-for-ci-only-must-be-long-enough"
+          ASPNETCORE_ENVIRONMENT: Test
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: coverage-report
-          path: backend/coverage/
+          path: backend/TestResults/
           retention-days: 7
 
   build:
@@ -447,7 +443,9 @@ jobs:
 
 `services`: Spin up containers phụ trợ (postgres, redis) cho job. Containers này tự động khởi động trước steps và bị xóa sau khi job xong. `options` với `--health-cmd` đảm bảo service sẵn sàng trước khi step đầu tiên chạy.
 
-`cache: npm` trong `setup-node`: Cache `node_modules` dựa trên `package-lock.json`. Lần đầu chạy mất 2–3 phút install, các lần sau chỉ mất 10–20 giây.
+`setup-dotnet`: Cache NuGet packages tự động theo dotnet-version. `dotnet restore` lần đầu mất 1–2 phút tải packages, các lần sau dùng cache chỉ mất vài giây.
+
+`dotnet ef database update`: Chạy EF Core migrations trước khi test. Cần package `Microsoft.EntityFrameworkCore.Design` và tool `dotnet-ef` được cài trong csproj hoặc global tool.
 
 `cache-from/cache-to: type=gha`: Docker layer cache lưu trong GitHub Actions cache storage. Build lần đầu mất 5–8 phút, build sau khi chỉ thay đổi code (không thay đổi dependencies) chỉ mất 30–60 giây.
 
@@ -558,11 +556,11 @@ jobs:
             docker compose up -d backend
 
             echo "=== Running migrations ==="
-            docker compose exec -T backend npm run migrate
+            docker compose exec -T backend dotnet ef database update
 
             echo "=== Health check ==="
             sleep 10
-            docker compose exec -T backend curl -f http://localhost:3000/health || exit 1
+            docker compose exec -T backend curl -f http://localhost:8080/health || exit 1
 
             echo "=== Deploy staging complete ==="
 
@@ -616,11 +614,11 @@ jobs:
             docker compose up -d --no-deps backend
 
             echo "=== Running migrations ==="
-            docker compose exec -T backend npm run migrate
+            docker compose exec -T backend dotnet ef database update
 
             echo "=== Health check ==="
             sleep 15
-            docker compose exec -T backend curl -f http://localhost:3000/health || exit 1
+            docker compose exec -T backend curl -f http://localhost:8080/health || exit 1
 
             echo "=== Cleaning up old images ==="
             docker image prune -f
@@ -782,31 +780,33 @@ Với cache: chỉ rebuild các layer thay đổi. Nếu chỉ thay đổi code 
 Nguyên tắc: đặt các layer ít thay đổi lên trên, thay đổi nhiều xuống dưới.
 
 ```dockerfile
-# Layer 1: Base image (hiếm khi thay đổi)
-FROM node:18-alpine
+# Stage 1: Build (layer ít thay đổi → layer thay đổi nhiều)
+FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
+WORKDIR /src
 
-# Layer 2: System dependencies (thay đổi rất ít)
-RUN apk add --no-cache curl
+# Layer 1: Copy csproj và restore (thay đổi khi dependency thay đổi)
+COPY *.csproj ./
+RUN dotnet restore
 
-# Layer 3: Working directory
-WORKDIR /app
-
-# Layer 4: Copy và install dependencies (thay đổi khi package.json thay đổi)
-COPY package*.json ./
-RUN npm ci --only=production
-
-# Layer 5: Copy source code (thay đổi thường xuyên nhất)
+# Layer 2: Copy source code (thay đổi thường xuyên nhất)
 COPY . .
 
-# Layer 6: Build
-RUN npm run build
+# Layer 3: Build và publish
+RUN dotnet publish -c Release -o /app/publish --no-restore
 
-# Layer 7: Expose và run (ít thay đổi)
-EXPOSE 3000
-CMD ["node", "dist/server.js"]
+# Stage 2: Runtime image (nhỏ hơn SDK ~3x)
+FROM mcr.microsoft.com/dotnet/aspnet:8.0
+WORKDIR /app
+COPY --from=build /app/publish .
+
+# ASP.NET Core mặc định listen port 8080 từ .NET 8
+EXPOSE 8080
+ENV ASPNETCORE_URLS=http://+:8080
+
+ENTRYPOINT ["dotnet", "ShopLite.Api.dll"]
 ```
 
-**Sai lầm phổ biến**: COPY . . trước RUN npm ci. Điều này làm cache của npm install bị invalidate mỗi khi thay đổi bất kỳ file nào trong source code.
+**Sai lầm phổ biến**: COPY . . trước RUN dotnet restore. Điều này làm cache của restore bị invalidate mỗi khi thay đổi bất kỳ file nào trong source code, dù không thêm package mới.
 
 #### Registry cache (cho production setup)
 
@@ -1075,30 +1075,30 @@ variables:
   POSTGRES_DB: shoplite_test
   POSTGRES_USER: shoplite
   POSTGRES_PASSWORD: test
-  DATABASE_URL: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/${POSTGRES_DB}"
+  CONNECTION_STRING: "Host=postgres;Port=5432;Database=${POSTGRES_DB};Username=${POSTGRES_USER};Password=${POSTGRES_PASSWORD}"
 
 # Template tái sử dụng
-.node-setup: &node-setup
-  image: node:18-alpine
+.dotnet-setup: &dotnet-setup
+  image: mcr.microsoft.com/dotnet/sdk:8.0
   cache:
     key:
       files:
-        - backend/package-lock.json
+        - backend/*.csproj
     paths:
-      - backend/node_modules/
+      - backend/.nuget/
 
 lint:
   stage: lint
-  <<: *node-setup
+  <<: *dotnet-setup
   script:
     - cd backend
-    - npm ci
-    - npm run lint
-    - npm run format:check
+    - dotnet restore
+    - dotnet format --verify-no-changes
+    - dotnet build --no-restore -c Release
 
 test:
   stage: test
-  <<: *node-setup
+  <<: *dotnet-setup
   services:
     - name: postgres:15
       alias: postgres
@@ -1106,16 +1106,20 @@ test:
       alias: redis
   script:
     - cd backend
-    - npm ci
-    - npm run migrate
-    - npm test
-  coverage: '/Statements.*?(\d+(?:\.\d+)?)%/'
+    - dotnet restore
+    - dotnet ef database update
+    - dotnet test --no-restore --collect:"XPlat Code Coverage"
+  coverage: '/Line coverage[^:]*:\s*([\d.]+)%/'
   artifacts:
     reports:
       coverage_report:
         coverage_format: cobertura
-        path: backend/coverage/cobertura-coverage.xml
+        path: backend/TestResults/**/coverage.cobertura.xml
     expire_in: 1 week
+  variables:
+    ConnectionStrings__DefaultConnection: $CONNECTION_STRING
+    ConnectionStrings__Redis: "redis:6379"
+    ASPNETCORE_ENVIRONMENT: Test
 
 build:
   stage: build
@@ -1144,7 +1148,7 @@ deploy-staging:
     - mkdir -p ~/.ssh
     - ssh-keyscan $STAGING_HOST >> ~/.ssh/known_hosts
   script:
-    - ssh ubuntu@$STAGING_HOST "cd /app/shoplite && docker compose pull && docker compose up -d"
+    - ssh ubuntu@$STAGING_HOST "cd /app/shoplite && docker compose pull && docker compose up -d && docker compose exec -T backend dotnet ef database update"
   environment:
     name: staging
     url: https://staging.shoplite.example.com
@@ -1162,7 +1166,7 @@ deploy-production:
     - mkdir -p ~/.ssh
     - ssh-keyscan $PROD_HOST >> ~/.ssh/known_hosts
   script:
-    - ssh ubuntu@$PROD_HOST "cd /app/shoplite && docker compose pull && docker compose up -d"
+    - ssh ubuntu@$PROD_HOST "cd /app/shoplite && docker compose pull && docker compose up -d && docker compose exec -T backend dotnet ef database update"
   environment:
     name: production
     url: https://shoplite.example.com

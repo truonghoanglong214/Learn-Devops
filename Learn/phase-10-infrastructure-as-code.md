@@ -1,4 +1,4 @@
-# Phase 10 — Infrastructure as Code (Terraform & Ansible)
+﻿# Phase 10 — Infrastructure as Code (Terraform & Ansible)
 
 ## Mục tiêu
 - Dựng lại toàn bộ hạ tầng cloud bằng **code** thay vì click chuột.
@@ -365,7 +365,7 @@ module "rds" {
   version = "~> 6.0"
 
   identifier = "${var.environment}-shoplite-db"
-  engine     = "mysql"
+  engine     = "postgres"
   # ...
 }
 ```
@@ -1005,11 +1005,11 @@ resource "aws_security_group" "rds" {
   vpc_id      = var.vpc_id
 
   ingress {
-    from_port       = 3306
-    to_port         = 3306
+    from_port       = 5432
+    to_port         = 5432
     protocol        = "tcp"
     security_groups = [var.web_sg_id]
-    description     = "MySQL from web servers only"
+    description     = "PostgreSQL from web servers only"
   }
 
   egress {
@@ -1036,36 +1036,31 @@ resource "aws_db_subnet_group" "main" {
 }
 
 # RDS Parameter Group
-resource "aws_db_parameter_group" "mysql" {
-  family = "mysql8.0"
-  name   = "${local.name_prefix}-mysql-params"
+resource "aws_db_parameter_group" "postgres" {
+  family = "postgres15"
+  name   = "${local.name_prefix}-postgres-params"
 
   parameter {
-    name  = "character_set_server"
-    value = "utf8mb4"
+    name  = "log_min_duration_statement"
+    value = "1000"
   }
 
   parameter {
-    name  = "collation_server"
-    value = "utf8mb4_unicode_ci"
-  }
-
-  parameter {
-    name  = "slow_query_log"
+    name  = "log_connections"
     value = "1"
   }
 
   parameter {
-    name  = "long_query_time"
-    value = "2"
+    name  = "log_disconnections"
+    value = "1"
   }
 }
 
 # RDS Instance
 resource "aws_db_instance" "main" {
   identifier     = "${local.name_prefix}-db"
-  engine         = "mysql"
-  engine_version = "8.0"
+  engine         = "postgres"
+  engine_version = "15.5"
   instance_class = var.instance_class
 
   allocated_storage     = 20
@@ -1079,7 +1074,7 @@ resource "aws_db_instance" "main" {
 
   db_subnet_group_name   = aws_db_subnet_group.main.name
   vpc_security_group_ids = [aws_security_group.rds.id]
-  parameter_group_name   = aws_db_parameter_group.mysql.name
+  parameter_group_name   = aws_db_parameter_group.postgres.name
 
   # Production settings
   multi_az               = var.environment == "production"
@@ -1526,7 +1521,7 @@ web1 ansible_host={web_ip} ansible_user=ubuntu ansible_ssh_private_key_file=~/.s
 [all:vars]
 ansible_python_interpreter=/usr/bin/python3
 db_host={db_endpoint.split(':')[0]}
-db_port=3306
+db_port=5432
 """
 
 print(inventory)
@@ -1964,13 +1959,13 @@ server {
 # Template cho .env file của application
 
 # Application
-APP_ENV={{ environment }}
-APP_PORT={{ app_port }}
+ASPNETCORE_ENVIRONMENT={{ environment | capitalize }}
+ASPNETCORE_HTTP_PORTS={{ app_port }}
 APP_SECRET_KEY={{ app_secret_key }}
 
 # Database
 DB_HOST={{ db_host }}
-DB_PORT={{ db_port | default(3306) }}
+DB_PORT={{ db_port | default(5432) }}
 DB_NAME={{ db_name }}
 DB_USER={{ db_username }}
 DB_PASSWORD={{ db_password }}
@@ -2200,7 +2195,7 @@ def parse_tf_output(tf_output: dict) -> dict:
     return {
         "web_ip": tf_output.get("web_public_ip", {}).get("value", ""),
         "db_host": tf_output.get("rds_endpoint", {}).get("value", "").split(":")[0],
-        "db_port": "3306",
+        "db_port": "5432",
         "s3_bucket": tf_output.get("s3_bucket_name", {}).get("value", ""),
         "environment": tf_output.get("environment", {}).get("value", "staging"),
     }

@@ -1,4 +1,4 @@
-# Phase 11 — Kubernetes
+﻿# Phase 11 — Kubernetes
 
 ## Mục tiêu
 - Chạy ShopLite trên cluster Kubernetes — kỹ năng được tuyển dụng săn đón nhất.
@@ -253,7 +253,7 @@ Một ứng dụng phổ biến của multi-container pods:
 
 ```
 Pod: shoplite-backend
-  Container 1: backend (Node.js app)
+  Container 1: backend (.NET app)
   Container 2: log-shipper (Fluentd/Filebeat)
     - Mount cùng volume chứa logs
     - Đọc logs từ volume, ship lên Elasticsearch/CloudWatch
@@ -275,7 +275,7 @@ metadata:
     version: v1.0.0
   annotations:
     prometheus.io/scrape: "true"
-    prometheus.io/port: "3000"
+    prometheus.io/port: "8080"
     prometheus.io/path: "/metrics"
 spec:
   containers:
@@ -283,12 +283,12 @@ spec:
       image: ghcr.io/user/shoplite-backend:v1.0.0
       imagePullPolicy: IfNotPresent
       ports:
-        - containerPort: 3000
+        - containerPort: 8080
           name: http
           protocol: TCP
       env:
-        - name: NODE_ENV
-          value: production
+        - name: ASPNETCORE_ENVIRONMENT
+          value: Production
         - name: DATABASE_URL
           valueFrom:
             secretKeyRef:
@@ -314,7 +314,7 @@ spec:
       livenessProbe:
         httpGet:
           path: /health
-          port: 3000
+          port: 8080
         initialDelaySeconds: 30
         periodSeconds: 10
         timeoutSeconds: 5
@@ -323,7 +323,7 @@ spec:
       readinessProbe:
         httpGet:
           path: /ready
-          port: 3000
+          port: 8080
         initialDelaySeconds: 5
         periodSeconds: 5
         timeoutSeconds: 3
@@ -332,7 +332,7 @@ spec:
       startupProbe:
         httpGet:
           path: /health
-          port: 3000
+          port: 8080
         initialDelaySeconds: 10
         periodSeconds: 10
         failureThreshold: 30
@@ -434,20 +434,20 @@ spec:
         tier: backend
       annotations:
         prometheus.io/scrape: "true"
-        prometheus.io/port: "3000"
+        prometheus.io/port: "8080"
     spec:
       containers:
         - name: backend
           image: ghcr.io/user/shoplite-backend:v1.0.0
           imagePullPolicy: IfNotPresent
           ports:
-            - containerPort: 3000
+            - containerPort: 8080
               name: http
           env:
-            - name: NODE_ENV
-              value: production
-            - name: PORT
-              value: "3000"
+            - name: ASPNETCORE_ENVIRONMENT
+              value: Production
+            - name: ASPNETCORE_HTTP_PORTS
+              value: "8080"
           envFrom:
             - configMapRef:
                 name: shoplite-config
@@ -463,14 +463,14 @@ spec:
           livenessProbe:
             httpGet:
               path: /health
-              port: 3000
+              port: 8080
             initialDelaySeconds: 30
             periodSeconds: 10
             failureThreshold: 3
           readinessProbe:
             httpGet:
               path: /ready
-              port: 3000
+              port: 8080
             initialDelaySeconds: 5
             periodSeconds: 5
             failureThreshold: 3
@@ -593,7 +593,7 @@ spec:
   ports:
     - name: http
       port: 80          # Port của Service
-      targetPort: 3000  # Port của container
+      targetPort: 8080  # Port của container
       protocol: TCP
 ```
 
@@ -610,7 +610,7 @@ spec:
   type: NodePort
   ports:
     - port: 80
-      targetPort: 3000
+      targetPort: 8080
       nodePort: 30080   # Optional: nếu không set, K8s tự assign
 ```
 
@@ -624,7 +624,7 @@ spec:
   type: LoadBalancer
   ports:
     - port: 80
-      targetPort: 3000
+      targetPort: 8080
   annotations:
     service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
     service.beta.kubernetes.io/aws-load-balancer-internal: "false"
@@ -660,7 +660,7 @@ Khi bạn tạo Service với selector, K8s tự tạo Endpoints object chứa d
 ```bash
 kubectl get endpoints shoplite-backend-svc -n shoplite
 # NAME                   ENDPOINTS                                         AGE
-# shoplite-backend-svc   10.0.1.5:3000,10.0.1.6:3000,10.0.1.7:3000        5m
+# shoplite-backend-svc   10.0.1.5:8080,10.0.1.6:8080,10.0.1.7:8080        5m
 ```
 
 Nếu service không route đến pods, check endpoints: nếu trống, labels selector không match.
@@ -777,8 +777,8 @@ metadata:
   name: shoplite-config
   namespace: shoplite
 data:
-  NODE_ENV: production
-  PORT: "3000"
+  ASPNETCORE_ENVIRONMENT: Production
+  ASPNETCORE_HTTP_PORTS: "8080"
   LOG_LEVEL: info
   REDIS_URL: redis://redis-svc:6379
   API_RATE_LIMIT: "100"
@@ -1367,7 +1367,7 @@ version: 1.0.0          # Chart version
 appVersion: "1.0.0"     # App version
 keywords:
   - ecommerce
-  - nodejs
+  - dotnet
   - postgresql
 maintainers:
   - name: DevOps Team
@@ -1400,7 +1400,7 @@ backend:
   service:
     type: ClusterIP
     port: 80
-    targetPort: 3000
+    targetPort: 8080
   resources:
     limits:
       cpu: 500m
@@ -1414,8 +1414,8 @@ backend:
     maxReplicas: 10
     targetCPUUtilizationPercentage: 70
   env:
-    NODE_ENV: production
-    PORT: "3000"
+    ASPNETCORE_ENVIRONMENT: Production
+    ASPNETCORE_HTTP_PORTS: "8080"
     LOG_LEVEL: info
 
 # Frontend
@@ -1747,7 +1747,7 @@ kubectl port-forward svc/shoplite-backend-svc 8080:80 -n shoplite
 # Sau đó: curl http://localhost:8080/api/products
 
 # Forward trực tiếp đến pod
-kubectl port-forward pod/shoplite-backend-xxx 3000:3000 -n shoplite
+kubectl port-forward pod/shoplite-backend-xxx 8080:8080 -n shoplite
 ```
 
 #### Resource usage

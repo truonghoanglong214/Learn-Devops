@@ -317,53 +317,59 @@ aws secretsmanager get-secret-value \
   --output text | jq -r '.password'
 ```
 
-**Trong ứng dụng Node.js — fetch tại runtime:**
+**Trong ứng dụng .NET (C#) — fetch tại runtime:**
 
-```javascript
-const { SecretsManagerClient, GetSecretValueCommand } = require("@aws-sdk/client-secrets-manager");
+Cài package:
 
-const client = new SecretsManagerClient({ region: "ap-southeast-1" });
+```bash
+dotnet add package AWSSDK.SecretsManager
+dotnet add package Npgsql.EntityFrameworkCore.PostgreSQL
+```
 
-async function getDatabaseCredentials() {
-  const command = new GetSecretValueCommand({
-    SecretId: "shoplite/prod/database",
-  });
-  const response = await client.send(command);
-  return JSON.parse(response.SecretString);
-}
+```csharp
+// SecretsService.cs
+using Amazon.SecretsManager;
+using Amazon.SecretsManager.Model;
+using System.Text.Json;
 
-// Sử dụng
-async function initDatabase() {
-  const creds = await getDatabaseCredentials();
-  const pool = new Pool({
-    host: creds.host,
-    port: creds.port,
-    database: creds.dbname,
-    user: creds.username,
-    password: creds.password,
-    ssl: { rejectUnauthorized: true },
-  });
-  return pool;
+public record DatabaseCredentials(
+    string username, string password,
+    string host, int port, string dbname);
+
+public class SecretsService
+{
+    private readonly IAmazonSecretsManager _client;
+
+    public SecretsService()
+    {
+        _client = new AmazonSecretsManagerClient(Amazon.RegionEndpoint.APSoutheast1);
+    }
+
+    public async Task<DatabaseCredentials> GetDatabaseCredentialsAsync()
+    {
+        var request = new GetSecretValueRequest
+        {
+            SecretId = "shoplite/prod/database"
+        };
+        var response = await _client.GetSecretValueAsync(request);
+        return JsonSerializer.Deserialize<DatabaseCredentials>(response.SecretString)!;
+    }
 }
 ```
 
-**Trong ứng dụng Python:**
+```csharp
+// Program.cs — đăng ký và sử dụng
+builder.Services.AddSingleton<SecretsService>();
 
-```python
-import boto3
-import json
+// Fetch credentials khi startup
+var tempProvider = builder.Services.BuildServiceProvider();
+var secretsService = tempProvider.GetRequiredService<SecretsService>();
+var creds = await secretsService.GetDatabaseCredentialsAsync();
 
-def get_secret(secret_name: str) -> dict:
-    client = boto3.client('secretsmanager', region_name='ap-southeast-1')
-    response = client.get_secret_value(SecretId=secret_name)
-    return json.loads(response['SecretString'])
-
-# Sử dụng
-db_creds = get_secret('shoplite/prod/database')
-DATABASE_URL = (
-    f"postgresql://{db_creds['username']}:{db_creds['password']}"
-    f"@{db_creds['host']}:{db_creds['port']}/{db_creds['dbname']}"
-)
+builder.Services.AddDbContext<AppDbContext>(opt =>
+    opt.UseNpgsql(
+        $"Host={creds.host};Port={creds.port};Database={creds.dbname};" +
+        $"Username={creds.username};Password={creds.password};SSL Mode=Require;Trust Server Certificate=false;"));
 ```
 
 **Auto-rotation — RDS password tự động rotate:**
@@ -465,28 +471,40 @@ kubectl get secret -n kube-system sealed-secrets-key -o yaml > sealed-secrets-ma
 
 Chạy container với root user là rủi ro nghiêm trọng. Nếu container bị compromise và process escape khỏi container, attacker có thể có quyền root trên host node.
 
-**Trong Dockerfile:**
+**Trong Dockerfile (.NET multi-stage build):**
 
 ```dockerfile
-FROM node:18-alpine
+# Stage 1: Build
+FROM mcr.microsoft.com/dotnet/sdk:8.0-alpine AS build
+WORKDIR /app
 
-# Tạo group và user riêng
-RUN addgroup -g 1001 -S nodejs && \
-    adduser -S -u 1001 -G nodejs nodejs
+# Restore riêng để tận dụng Docker layer cache
+COPY *.csproj ./
+RUN dotnet restore --runtime linux-musl-x64
+
+# Build và publish
+COPY . .
+RUN dotnet publish -c Release -o /app/publish \
+    --runtime linux-musl-x64 --self-contained false --no-restore
+
+# Stage 2: Runtime image nhỏ, không có SDK
+FROM mcr.microsoft.com/dotnet/aspnet:8.0-alpine AS runtime
+
+# Tạo group và user riêng (non-root)
+RUN addgroup -g 1001 -S dotnet && \
+    adduser -S -u 1001 -G dotnet dotnet
 
 WORKDIR /app
 
-# Copy files với ownership đúng
-COPY --chown=nodejs:nodejs package*.json ./
-RUN npm ci --only=production
-
-COPY --chown=nodejs:nodejs . .
+# Copy chỉ published output với đúng ownership
+COPY --from=build --chown=dotnet:dotnet /app/publish ./
 
 # Switch sang non-root user TRƯỚC CMD
-USER nodejs
+USER dotnet
 
-EXPOSE 3000
-CMD ["node", "server.js"]
+EXPOSE 8080
+ENV ASPNETCORE_URLS=http://+:8080
+CMD ["dotnet", "ShopLite.Backend.dll"]
 ```
 
 **Trong Kubernetes Pod SecurityContext:**
@@ -736,7 +754,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Build Docker image
+      - name: Build Docker image (.NET multi-stage)
         run: |
           docker build -t shoplite-backend:${{ github.sha }} ./backend
 
@@ -1667,10 +1685,9 @@ brew install semgrep
 # Scan với ruleset tự động (community rules)
 semgrep --config auto .
 
-# Scan với rules cụ thể
+# Scan với rules cụ thể cho .NET
 semgrep --config "p/owasp-top-ten" .
-semgrep --config "p/javascript" .
-semgrep --config "p/python" .
+semgrep --config "p/csharp" .
 semgrep --config "p/docker" .
 
 # Fail nếu tìm thấy issues
@@ -1680,60 +1697,94 @@ semgrep --config auto --error .
 semgrep --config auto --json > semgrep-results.json
 ```
 
-**Custom Semgrep rules cho ShopLite:**
+**Custom Semgrep rules cho ShopLite (.NET):**
 
 ```yaml
 # .semgrep/shoplite-rules.yaml
 rules:
-  - id: no-hardcoded-password
+  - id: no-hardcoded-connection-string
     patterns:
       - pattern: |
-          $X = "..." + "password" + "..."
+          new SqlConnection("...password=...")
       - pattern: |
-          password = "..."
-    message: "Potential hardcoded password detected"
+          "Server=...;Password=..."
+    message: "Potential hardcoded connection string detected"
     severity: ERROR
-    languages: [javascript, python]
+    languages: [csharp]
 
-  - id: sql-injection-risk
+  - id: sql-injection-risk-csharp
     patterns:
       - pattern: |
-          db.query("..." + $USER_INPUT)
-    message: "Potential SQL injection - use parameterized queries"
+          new SqlCommand("..." + $USER_INPUT, ...)
+      - pattern: |
+          $CMD.CommandText = "..." + $USER_INPUT
+    message: "Potential SQL injection - use parameterized queries or EF Core"
     severity: ERROR
-    languages: [javascript]
+    languages: [csharp]
+
+  - id: weak-password-hashing
+    patterns:
+      - pattern: |
+          MD5.HashData(...)
+      - pattern: |
+          SHA1.HashData(...)
+    message: "Weak hashing for passwords - use BCrypt or ASP.NET Identity"
+    severity: WARNING
+    languages: [csharp]
 ```
 
 #### 9.2 Dependency Scanning
 
 ```bash
-# Node.js
-npm audit                           # scan vulnerabilities
-npm audit --audit-level=high       # fail nếu có HIGH hoặc CRITICAL
-npm audit fix                       # tự động fix nếu có thể
-npm audit --json > npm-audit.json   # output JSON
+# .NET — kiểm tra NuGet packages có CVE
+dotnet list package --vulnerable                  # hiện packages có lỗ hổng đã biết
+dotnet list package --vulnerable --include-transitive  # bao gồm cả transitive deps
+dotnet list package --outdated                    # kiểm tra packages lỗi thời
 
-# Python
-pip install pip-audit
-pip-audit                           # scan
-pip-audit --fix                     # fix nếu có thể
+# Exit code khác 0 nếu có vulnerabilities — dùng trong CI
+dotnet list package --vulnerable 2>&1 | grep -i "has the following vulnerable packages"
+if [ $? -eq 0 ]; then echo "Vulnerable packages found!"; exit 1; fi
 
-# Snyk (requires account)
-npm install -g snyk
-snyk test                           # scan
-snyk test --severity-threshold=high # fail nếu có HIGH
-snyk monitor                        # monitor ongoing
+# OWASP Dependency-Check (mạnh hơn, check NVD database)
+docker run --rm \
+  -v "$(pwd):/src" \
+  -v "$(pwd)/reports:/report" \
+  owasp/dependency-check:latest \
+  --scan /src \
+  --format HTML --format JSON \
+  --out /report \
+  --failOnCVSS 7
+
+# Snyk (requires account — hỗ trợ .NET tốt)
+dotnet tool install -g snyk
+snyk test --severity-threshold=high   # scan
+snyk monitor                          # monitor ongoing
 ```
 
 **Trong GitHub Actions:**
 
 ```yaml
-- name: Run npm audit
-  run: npm audit --audit-level=high
+- name: Setup .NET
+  uses: actions/setup-dotnet@v4
+  with:
+    dotnet-version: '8.0.x'
+
+- name: Restore dependencies
+  run: dotnet restore
+  working-directory: ./backend
+
+- name: Check for vulnerable packages
+  run: |
+    dotnet list package --vulnerable --include-transitive 2>&1 | tee vuln-report.txt
+    if grep -q "has the following vulnerable packages" vuln-report.txt; then
+      echo "FAIL: Vulnerable NuGet packages found"
+      cat vuln-report.txt
+      exit 1
+    fi
   working-directory: ./backend
 
 - name: Snyk security scan
-  uses: snyk/actions/node@master
+  uses: snyk/actions/dotnet@master
   env:
     SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
   with:
@@ -1804,12 +1855,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-dotnet@v4
         with:
-          node-version: '18'
-      - run: npm ci
+          dotnet-version: '8.0.x'
+      - run: dotnet restore
         working-directory: ./backend
-      - run: npm audit --audit-level=high
+      - name: Check for vulnerable packages
+        run: |
+          dotnet list package --vulnerable --include-transitive 2>&1 | tee vuln-report.txt
+          if grep -q "has the following vulnerable packages" vuln-report.txt; then
+            echo "FAIL: Vulnerable NuGet packages found"; exit 1
+          fi
         working-directory: ./backend
 
   iac-scan:

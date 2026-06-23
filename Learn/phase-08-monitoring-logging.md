@@ -279,11 +279,11 @@ scrape_configs:
       - targets:
           - localhost:9090
 
-  # ShopLite Backend (Node.js)
+  # ShopLite Backend (.NET)
   - job_name: shoplite-backend
     static_configs:
       - targets:
-          - backend:3000
+          - backend:8080
     metrics_path: /metrics
     scrape_interval: 10s       # Override global interval cho service quan trọng
 
@@ -324,8 +324,8 @@ scrape_configs:
         - http_2xx
     static_configs:
       - targets:
-          - http://backend:3000/health
-          - http://backend:3000/ready
+          - http://backend:8080/health
+          - http://backend:8080/ready
     relabel_configs:
       - source_labels: [__address__]
         target_label: __param_target
@@ -482,168 +482,174 @@ modules:
 
 ---
 
-### 4. Instrumentation trong Node.js Backend
+### 4. Instrumentation trong .NET Backend
 
-Thêm Prometheus metrics vào backend Node.js/Express bằng thư viện `prom-client`.
+Thêm Prometheus metrics vào backend ASP.NET Core bằng thư viện `prometheus-net`.
 
 #### Cài đặt
 
 ```bash
-npm install prom-client
+dotnet add package prometheus-net.AspNetCore
 ```
 
-#### File: src/metrics.js
+#### File: Infrastructure/Metrics/AppMetrics.cs
 
-```javascript
-const prometheus = require('prom-client');
+```csharp
+using Prometheus;
 
-// Thu thập default metrics: CPU, memory, event loop lag, GC, v.v.
-const collectDefaultMetrics = prometheus.collectDefaultMetrics;
-collectDefaultMetrics({
-  prefix: 'shoplite_',  // prefix để phân biệt với metrics của service khác
-  gcDurationBuckets: [0.001, 0.01, 0.1, 1, 2, 5]
-});
+namespace ShopLite.Infrastructure.Metrics;
 
-// ------- Custom Metrics -------
+public static class AppMetrics
+{
+    // Counter: tổng số HTTP requests
+    public static readonly Counter HttpRequestsTotal = Metrics.CreateCounter(
+        "http_requests_total",
+        "Tổng số HTTP requests nhận được",
+        new CounterConfiguration
+        {
+            LabelNames = new[] { "method", "route", "status_code" }
+        });
 
-// Counter: tổng số HTTP requests
-const httpRequestsTotal = new prometheus.Counter({
-  name: 'http_requests_total',
-  help: 'Tổng số HTTP requests nhận được',
-  labelNames: ['method', 'route', 'status_code']
-});
+    // Histogram: phân phối thời gian xử lý request
+    public static readonly Histogram HttpRequestDuration = Metrics.CreateHistogram(
+        "http_request_duration_seconds",
+        "Thời gian xử lý HTTP request (giây)",
+        new HistogramConfiguration
+        {
+            LabelNames = new[] { "method", "route", "status_code" },
+            // Buckets từ 5ms đến 5s — điều chỉnh theo SLO
+            Buckets = new[] { 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0 }
+        });
 
-// Histogram: phân phối thời gian xử lý request
-const httpRequestDuration = new prometheus.Histogram({
-  name: 'http_request_duration_seconds',
-  help: 'Thời gian xử lý HTTP request (giây)',
-  labelNames: ['method', 'route', 'status_code'],
-  // Buckets từ 5ms đến 5s — điều chỉnh theo SLO
-  buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5]
-});
+    // Gauge: số active connections hiện tại
+    public static readonly Gauge ActiveConnections = Metrics.CreateGauge(
+        "http_active_connections",
+        "Số HTTP connections đang active");
 
-// Gauge: số active connections hiện tại
-const activeConnections = new prometheus.Gauge({
-  name: 'http_active_connections',
-  help: 'Số HTTP connections đang active'
-});
+    // Counter: số lần checkout thành công / thất bại
+    public static readonly Counter CheckoutTotal = Metrics.CreateCounter(
+        "checkout_total",
+        "Tổng số lần checkout",
+        new CounterConfiguration
+        {
+            LabelNames = new[] { "status" }  // success, failure
+        });
 
-// Counter: số lần checkout thành công / thất bại
-const checkoutTotal = new prometheus.Counter({
-  name: 'checkout_total',
-  help: 'Tổng số lần checkout',
-  labelNames: ['status']  // success, failure
-});
-
-// Gauge: số items trong cart (ví dụ business metric)
-const cartItemsGauge = new prometheus.Gauge({
-  name: 'cart_items_total',
-  help: 'Tổng số items trong tất cả active carts'
-});
-
-// Histogram: database query duration
-const dbQueryDuration = new prometheus.Histogram({
-  name: 'db_query_duration_seconds',
-  help: 'Thời gian thực hiện database query',
-  labelNames: ['query_type', 'table'],
-  buckets: [0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1]
-});
-
-module.exports = {
-  prometheus,
-  httpRequestsTotal,
-  httpRequestDuration,
-  activeConnections,
-  checkoutTotal,
-  cartItemsGauge,
-  dbQueryDuration
-};
-```
-
-#### File: src/middleware/metrics.middleware.js
-
-```javascript
-const {
-  httpRequestsTotal,
-  httpRequestDuration,
-  activeConnections
-} = require('../metrics');
-
-// Middleware đo thời gian và đếm mọi HTTP request
-function metricsMiddleware(req, res, next) {
-  // Tăng active connections
-  activeConnections.inc();
-
-  // Bắt đầu đo thời gian
-  const endTimer = httpRequestDuration.startTimer();
-
-  // Khi response kết thúc
-  res.on('finish', () => {
-    // Normalize route path để tránh high cardinality
-    // VD: /users/123 -> /users/:id
-    const route = req.route ? req.route.path : req.path;
-
-    const labels = {
-      method: req.method,
-      route: route,
-      status_code: res.statusCode
-    };
-
-    // Tăng counter
-    httpRequestsTotal.inc(labels);
-
-    // Kết thúc timer (tự động record duration với labels)
-    endTimer(labels);
-
-    // Giảm active connections
-    activeConnections.dec();
-  });
-
-  next();
+    // Histogram: database query duration
+    public static readonly Histogram DbQueryDuration = Metrics.CreateHistogram(
+        "db_query_duration_seconds",
+        "Thời gian thực hiện database query",
+        new HistogramConfiguration
+        {
+            LabelNames = new[] { "query_type", "table" },
+            Buckets = new[] { 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0 }
+        });
 }
-
-module.exports = metricsMiddleware;
 ```
 
-#### File: src/routes/metrics.route.js
+#### File: Infrastructure/Metrics/MetricsMiddleware.cs
 
-```javascript
-const express = require('express');
-const { prometheus } = require('../metrics');
+```csharp
+using System.Diagnostics;
 
-const router = express.Router();
+namespace ShopLite.Infrastructure.Metrics;
 
-// Endpoint Prometheus scrape
-router.get('/', async (req, res) => {
-  try {
-    res.set('Content-Type', prometheus.register.contentType);
-    const metrics = await prometheus.register.metrics();
-    res.end(metrics);
-  } catch (err) {
-    res.status(500).end(err.message);
-  }
-});
+public class MetricsMiddleware
+{
+    private readonly RequestDelegate _next;
 
-module.exports = router;
+    public MetricsMiddleware(RequestDelegate next) => _next = next;
+
+    public async Task InvokeAsync(HttpContext context)
+    {
+        AppMetrics.ActiveConnections.Inc();
+        var sw = Stopwatch.StartNew();
+
+        try
+        {
+            await _next(context);
+        }
+        finally
+        {
+            sw.Stop();
+
+            // Normalize route để tránh high cardinality: /products/123 -> /products/{id}
+            var route = context.GetRouteTemplate() ?? context.Request.Path.Value ?? "unknown";
+            var method = context.Request.Method;
+            var status = context.Response.StatusCode.ToString();
+
+            AppMetrics.HttpRequestsTotal.WithLabels(method, route, status).Inc();
+            AppMetrics.HttpRequestDuration.WithLabels(method, route, status).Observe(sw.Elapsed.TotalSeconds);
+            AppMetrics.ActiveConnections.Dec();
+        }
+    }
+}
 ```
 
-#### Trong app.js / server.js
+#### Program.cs — Đăng ký middleware và metrics endpoint
 
-```javascript
-const express = require('express');
-const metricsMiddleware = require('./middleware/metrics.middleware');
-const metricsRoute = require('./routes/metrics.route');
+```csharp
+using Prometheus;
+using ShopLite.Infrastructure.Metrics;
 
-const app = express();
+var builder = WebApplication.CreateBuilder(args);
 
-// Áp dụng metrics middleware TRƯỚC các routes khác
-app.use(metricsMiddleware);
+builder.Services.AddControllers();
+// ... các services khác
 
-// Metrics endpoint (thường không cần auth trong internal network)
-app.use('/metrics', metricsRoute);
+var app = builder.Build();
 
-// Các routes khác của app...
-app.use('/api', apiRoutes);
+app.UseRouting();
+
+// Custom metrics middleware đo thời gian và đếm requests
+app.UseMiddleware<MetricsMiddleware>();
+
+// Expose /metrics endpoint để Prometheus scrape (port 8080)
+app.MapMetrics();
+
+app.MapControllers();
+app.Run();
+```
+
+#### Sử dụng trong business logic
+
+```csharp
+using ShopLite.Infrastructure.Metrics;
+
+public class CheckoutService
+{
+    public async Task<OrderResult> ProcessCheckoutAsync(CheckoutRequest request)
+    {
+        try
+        {
+            var result = await _orderRepository.CreateAsync(request);
+            AppMetrics.CheckoutTotal.WithLabels("success").Inc();
+            return result;
+        }
+        catch (Exception)
+        {
+            AppMetrics.CheckoutTotal.WithLabels("failure").Inc();
+            throw;
+        }
+    }
+}
+```
+
+#### Đo thời gian database query
+
+```csharp
+public class ProductRepository
+{
+    public async Task<List<Product>> GetAllAsync()
+    {
+        // NewTimer() tự động record duration khi Dispose (using block kết thúc)
+        using var timer = AppMetrics.DbQueryDuration
+            .WithLabels("select", "products")
+            .NewTimer();
+
+        return await _context.Products.ToListAsync();
+    }
+}
 ```
 
 ---
@@ -951,48 +957,73 @@ scrape_configs:
 
 ---
 
-#### Structured Logging trong Node.js
+#### Structured Logging trong .NET (Serilog)
 
-Để Promtail parse được, app nên log ra JSON (structured logging):
+Để Promtail parse được, app nên log ra JSON (structured logging). Dùng **Serilog** — thư viện logging phổ biến nhất cho .NET.
 
-```javascript
-// npm install winston
-const winston = require('winston');
+```bash
+dotnet add package Serilog.AspNetCore
+dotnet add package Serilog.Sinks.Console
+dotnet add package Serilog.Formatting.Compact
+```
 
-const logger = winston.createLogger({
-  level: process.env.LOG_LEVEL || 'info',
-  format: winston.format.combine(
-    winston.format.timestamp(),
-    winston.format.errors({ stack: true }),
-    winston.format.json()    // Output JSON format
-  ),
-  transports: [
-    new winston.transports.Console()  // Docker capture stdout/stderr
-  ]
+```csharp
+// Program.cs
+using Serilog;
+using Serilog.Formatting.Compact;
+
+Log.Logger = new LoggerConfiguration()
+    .MinimumLevel.Information()
+    .MinimumLevel.Override("Microsoft.AspNetCore", Serilog.Events.LogEventLevel.Warning)
+    .Enrich.FromLogContext()
+    .WriteTo.Console(new CompactJsonFormatter())  // output JSON — Docker capture stdout
+    .CreateLogger();
+
+builder.Host.UseSerilog();
+
+// Request logging middleware (tự động log mọi HTTP request)
+app.UseSerilogRequestLogging(options =>
+{
+    options.EnrichDiagnosticContext = (diagnosticContext, httpContext) =>
+    {
+        diagnosticContext.Set("RequestId", httpContext.TraceIdentifier);
+        diagnosticContext.Set("UserAgent", httpContext.Request.Headers.UserAgent);
+        diagnosticContext.Set("ClientIp", httpContext.Connection.RemoteIpAddress);
+    };
 });
+```
 
-// Sử dụng
-logger.info('User logged in', { userId: 123, ip: '192.168.1.1' });
-logger.error('Checkout failed', { userId: 456, orderId: 789, error: err.message, stack: err.stack });
-logger.warn('Slow query detected', { duration: 1200, query: 'SELECT * FROM products' });
+```csharp
+// Sử dụng trong service/controller
+public class CheckoutService
+{
+    private readonly ILogger<CheckoutService> _logger;
 
-// Request logging middleware
-app.use((req, res, next) => {
-  const start = Date.now();
-  res.on('finish', () => {
-    logger.info('HTTP request', {
-      method: req.method,
-      url: req.originalUrl,
-      status: res.statusCode,
-      duration: Date.now() - start,
-      requestId: req.headers['x-request-id'],
-      userAgent: req.headers['user-agent']
-    });
-  });
-  next();
-});
+    public CheckoutService(ILogger<CheckoutService> logger)
+        => _logger = logger;
 
-module.exports = logger;
+    public async Task ProcessAsync(int userId, int orderId)
+    {
+        _logger.LogInformation("Checkout started for user {UserId}", userId);
+
+        try
+        {
+            // ... business logic
+            _logger.LogInformation("Checkout succeeded {UserId} {OrderId}", userId, orderId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Checkout failed for user {UserId} order {OrderId}", userId, orderId);
+            throw;
+        }
+    }
+}
+```
+
+Output JSON mẫu (Promtail sẽ parse được):
+```json
+{"@t":"2024-01-15T03:15:42.123Z","@mt":"Checkout succeeded {UserId} {OrderId}","UserId":456,"OrderId":789,"level":"Information"}
+{"@t":"2024-01-15T03:15:42.500Z","@mt":"Checkout failed for user {UserId} order {OrderId}","UserId":456,"OrderId":789,"@x":"System.Exception: DB timeout...","level":"Error"}
 ```
 
 ---
@@ -1525,109 +1556,72 @@ Health check endpoints là chuẩn mực trong production — Kubernetes, load b
 - Nếu fail: container bị remove khỏi load balancer (không restart).
 - Dùng khi deploy: service mới start nhưng DB chưa kết nối được -> không nhận traffic.
 
-#### Implementation trong Node.js/Express
+#### Implementation trong ASP.NET Core
 
-```javascript
-// src/routes/health.routes.js
-const express = require('express');
-const router = express.Router();
-const { Pool } = require('pg');
-const redis = require('ioredis');
-const logger = require('../utils/logger');
+ASP.NET Core có built-in health check system. Không cần viết routes thủ công.
 
-// Đây là instance được share với toàn app
-const db = require('../db');
-const redisClient = require('../redis');
+```bash
+dotnet add package AspNetCore.HealthChecks.NpgSql
+dotnet add package AspNetCore.HealthChecks.Redis
+dotnet add package AspNetCore.HealthChecks.UI.Client
+```
 
-// ---- Liveness Probe ----
-// Luôn trả về 200 nếu process đang chạy
-router.get('/health', (req, res) => {
-  res.status(200).json({
-    status: 'ok',
-    timestamp: new Date().toISOString(),
-    uptime: Math.floor(process.uptime()),          // seconds
-    version: process.env.APP_VERSION || 'unknown',
-    pid: process.pid
-  });
+```csharp
+// Program.cs — Đăng ký health checks
+builder.Services.AddHealthChecks()
+    // Liveness: không check gì cả (chỉ cần app respond là sống)
+    // Readiness: check database + redis (tag "ready")
+    .AddNpgsql(
+        builder.Configuration.GetConnectionString("DefaultConnection")!,
+        name: "database",
+        tags: new[] { "ready" })
+    .AddRedis(
+        builder.Configuration.GetConnectionString("Redis")!,
+        name: "redis",
+        tags: new[] { "ready" });
+
+// ...
+
+// Liveness probe: /health — 200 nếu process đang chạy
+app.MapHealthChecks("/health", new HealthCheckOptions
+{
+    Predicate = _ => false  // bỏ qua dependencies — chỉ check process còn sống
 });
 
-// ---- Readiness Probe ----
-// Check tất cả dependencies
-router.get('/ready', async (req, res) => {
-  const checks = {};
-  let isReady = true;
+// Readiness probe: /ready — 200 nếu tất cả dependencies OK, 503 nếu có lỗi
+app.MapHealthChecks("/ready", new HealthCheckOptions
+{
+    Predicate = check => check.Tags.Contains("ready"),
+    ResponseWriter = UIResponseWriter.WriteHealthCheckUIResponse
+});
+```
 
-  // Check Database
-  try {
-    const start = Date.now();
-    await db.query('SELECT 1');
-    checks.database = {
-      status: 'ok',
-      latency_ms: Date.now() - start
-    };
-  } catch (err) {
-    isReady = false;
-    checks.database = {
-      status: 'error',
-      error: err.message
-    };
-    logger.warn('Readiness check: database failed', { error: err.message });
+Response `/health` (liveness):
+```json
+{"status":"Healthy"}
+```
+
+Response `/ready` (readiness) khi healthy:
+```json
+{
+  "status": "Healthy",
+  "totalDuration": "00:00:00.0041234",
+  "entries": {
+    "database": { "status": "Healthy", "duration": "00:00:00.0032100" },
+    "redis":    { "status": "Healthy", "duration": "00:00:00.0009134" }
   }
+}
+```
 
-  // Check Redis
-  try {
-    const start = Date.now();
-    await redisClient.ping();
-    checks.redis = {
-      status: 'ok',
-      latency_ms: Date.now() - start
-    };
-  } catch (err) {
-    isReady = false;
-    checks.redis = {
-      status: 'error',
-      error: err.message
-    };
-    logger.warn('Readiness check: redis failed', { error: err.message });
+Response `/ready` khi database lỗi (trả về HTTP 503):
+```json
+{
+  "status": "Unhealthy",
+  "entries": {
+    "database": { "status": "Unhealthy", "description": "An error occurred while executing the health check.", "exception": "Connection refused" },
+    "redis":    { "status": "Healthy" }
   }
-
-  // Check memory (optional — flag nếu sắp OOM)
-  const memUsage = process.memoryUsage();
-  const heapUsedPercent = (memUsage.heapUsed / memUsage.heapTotal) * 100;
-  checks.memory = {
-    status: heapUsedPercent > 90 ? 'warning' : 'ok',
-    heap_used_mb: Math.round(memUsage.heapUsed / 1024 / 1024),
-    heap_total_mb: Math.round(memUsage.heapTotal / 1024 / 1024),
-    heap_used_percent: Math.round(heapUsedPercent)
-  };
-
-  const statusCode = isReady ? 200 : 503;
-  res.status(statusCode).json({
-    status: isReady ? 'ready' : 'not ready',
-    timestamp: new Date().toISOString(),
-    checks
-  });
-});
-
-// ---- Deep Health (cho debugging, không dùng cho probe) ----
-router.get('/health/details', async (req, res) => {
-  const info = {
-    app: {
-      name: 'shoplite-backend',
-      version: process.env.APP_VERSION,
-      node_version: process.version,
-      uptime_seconds: Math.floor(process.uptime()),
-      pid: process.pid
-    },
-    memory: process.memoryUsage(),
-    cpu: process.cpuUsage(),
-    env: process.env.NODE_ENV
-  };
-
-  res.json(info);
-});
-
-module.exports = router;
+}
 ```
 
 #### Cấu Hình trong docker-compose
@@ -1637,7 +1631,7 @@ module.exports = router;
 backend:
   image: shoplite-backend:latest
   healthcheck:
-    test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000/health"]
+    test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/health"]
     interval: 30s
     timeout: 10s
     retries: 3
@@ -1660,8 +1654,8 @@ Kết hợp blackbox_exporter để Prometheus monitor health endpoints từ bê
       - http_2xx
   static_configs:
     - targets:
-        - http://backend:3000/health
-        - http://backend:3000/ready
+        - http://backend:8080/health
+        - http://backend:8080/ready
         - http://frontend:80
   relabel_configs:
     - source_labels: [__address__]

@@ -85,20 +85,20 @@ cgroups không chỉ cách ly mà còn **giới hạn và đo lường** tài ng
 #### 1.3 Vấn đề "Works on My Machine"
 
 Đây là vấn đề cổ điển trong phần mềm:
-- Developer A code trên macOS, dùng Node.js 18, Python 3.11, libpq 14.
-- CI server chạy Ubuntu 20.04, Node.js 16, Python 3.8, libpq 12.
-- Production server chạy CentOS 7, Node.js 14, Python 3.6.
+- Developer A code trên macOS, dùng .NET SDK 8.0.100, Npgsql 8.0.
+- CI server chạy Ubuntu 22.04, .NET SDK 7.0, Npgsql 7.0.
+- Production server chạy CentOS Stream 9, .NET Runtime 6.0.
 - Kết quả: app chạy tốt trên máy dev, lỗi trên CI, crash trên production.
 
 Container giải quyết bằng cách **đóng gói toàn bộ môi trường vào image**:
 ```
 Image ShopLite Backend chứa:
-  - Ubuntu 22.04 base filesystem
-  - Node.js 18.17.0 (exact version)
-  - npm packages (package-lock.json locked)
+  - Alpine Linux base filesystem
+  - ASP.NET Core 8.0 runtime (exact version)
+  - NuGet packages (packages.lock.json locked)
   - Environment variables
   - Config files
-  - Source code hoặc compiled artifact
+  - Compiled .NET publish artifacts (.dll, appsettings.json)
 ```
 
 Image này chạy **giống hệt nhau** trên laptop dev, CI server, staging, production — miễn là host có Docker Engine.
@@ -235,11 +235,11 @@ Một image có:
 Mỗi instruction trong Dockerfile tạo ra một **layer mới**:
 
 ```
-Layer 0 (base): ubuntu:22.04 filesystem (~77 MB)
-Layer 1: RUN apt-get update && apt-get install -y curl (~15 MB)
-Layer 2: COPY package*.json ./ (~5 KB)
-Layer 3: RUN npm install (~45 MB)
-Layer 4: COPY . . (~2 MB)
+Layer 0 (base): mcr.microsoft.com/dotnet/aspnet:8.0-alpine (~103 MB)
+Layer 1: COPY ShopLite.Api/*.csproj ./ShopLite.Api/ (~5 KB)
+Layer 2: RUN dotnet restore (~50 MB NuGet packages)
+Layer 3: COPY ShopLite.Api/ . (~2 MB source code)
+Layer 4: RUN dotnet publish -c Release -o /app/publish (~5 MB)
 ```
 
 Docker dùng **overlay2** filesystem driver (mặc định trên Linux hiện đại) để stack các layers:
@@ -247,15 +247,15 @@ Docker dùng **overlay2** filesystem driver (mặc định trên Linux hiện đ
 ```
 upperdir (writable layer - container specific)
       |
-layer 4: /app (source code)
+layer 4: /app/publish (compiled .dll artifacts)
       |
-layer 3: /app/node_modules
+layer 3: /src/ShopLite.Api (source code .cs files)
       |
-layer 2: /app/package.json
+layer 2: /root/.nuget/packages (NuGet packages)
       |
-layer 1: /usr/bin/curl, /etc/apt/...
+layer 1: /src/ShopLite.Api/*.csproj
       |
-layer 0: /bin, /lib, /usr, /etc (ubuntu base)
+layer 0: /bin, /lib, /usr, /etc (aspnet alpine base)
 ```
 
 Khi container đọc file, overlay2 tìm từ upperdir xuống: tìm thấy ở layer nào thì dùng layer đó.
@@ -272,17 +272,17 @@ thì Docker dùng lại cached layer thay vì build lại.
 **Thứ tự instruction ảnh hưởng lớn đến cache efficiency:**
 
 ```dockerfile
-# XẤU: thay đổi source code sẽ invalidate npm install cache
+# XẤU: thay đổi source code sẽ invalidate dotnet restore cache
 COPY . .
-RUN npm install
+RUN dotnet restore
 
-# TỐT: chỉ khi package.json thay đổi mới re-run npm install
-COPY package*.json ./
-RUN npm install
+# TỐT: chỉ khi .csproj thay đổi mới re-run dotnet restore
+COPY *.csproj ./
+RUN dotnet restore
 COPY . .
 ```
 
-Với cách tốt, trong development, chỉ thay đổi source code sẽ chỉ re-run `COPY . .` (nhanh), không phải `npm install` (chậm).
+Với cách tốt, trong development, chỉ thay đổi source code sẽ chỉ re-run `COPY . .` (nhanh), không phải `dotnet restore` (chậm).
 
 #### 3.4 Container Layer
 
@@ -372,46 +372,46 @@ FROM nginx:alpine AS runner
 #### 4.2 ARG — Build-time variable
 
 ```dockerfile
-ARG NODE_VERSION=18
+ARG DOTNET_VERSION=8.0
 ARG BUILD_DATE
 ARG GIT_COMMIT
 ```
 
 - Biến chỉ có tác dụng **trong quá trình build**.
 - Không tồn tại trong image cuối và không có trong container runtime.
-- Có thể override khi build: `docker build --build-arg NODE_VERSION=20 .`
-- Dùng kết hợp với FROM: `FROM node:${NODE_VERSION}-alpine`
+- Có thể override khi build: `docker build --build-arg DOTNET_VERSION=9.0 .`
+- Dùng kết hợp với FROM: `FROM mcr.microsoft.com/dotnet/sdk:${DOTNET_VERSION}-alpine`
 - **Không dùng ARG cho secrets** — ARG value hiện trong `docker history`.
 
 ```dockerfile
-ARG NODE_VERSION=18
-FROM node:${NODE_VERSION}-alpine
+ARG DOTNET_VERSION=8.0
+FROM mcr.microsoft.com/dotnet/sdk:${DOTNET_VERSION}-alpine AS builder
 
 # ARG phía trên FROM chỉ dùng được trong FROM
 # Để dùng sau FROM, cần khai báo lại:
-ARG NODE_VERSION=18
-RUN echo "Building with Node.js ${NODE_VERSION}"
+ARG DOTNET_VERSION=8.0
+RUN echo "Building with .NET SDK ${DOTNET_VERSION}"
 ```
 
 #### 4.3 ENV — Runtime variable
 
 ```dockerfile
-ENV NODE_ENV=production
-ENV PORT=3000
-ENV DATABASE_URL=postgresql://localhost/shoplite
+ENV ASPNETCORE_ENVIRONMENT=Production
+ENV ASPNETCORE_URLS=http://+:8080
+ENV ConnectionStrings__Redis=redis:6379
 ```
 
 - Tồn tại trong image và available khi container chạy.
-- Có thể override khi run: `docker run -e NODE_ENV=staging image`.
+- Có thể override khi run: `docker run -e ASPNETCORE_ENVIRONMENT=Staging image`.
 - Khác ARG: ENV persist trong image, visible trong `docker inspect`.
 - **Không dùng ENV cho secrets** — hiện trong `docker inspect` và image metadata.
-- Dùng Docker secrets hoặc mount file cho passwords/tokens.
+- Dùng Docker secrets hoặc volume mount cho passwords/tokens.
 
 ```dockerfile
 # Đặt nhiều biến trên một dòng
-ENV NODE_ENV=production \
-    PORT=3000 \
-    LOG_LEVEL=info
+ENV ASPNETCORE_ENVIRONMENT=Production \
+    ASPNETCORE_URLS=http://+:8080 \
+    Logging__LogLevel__Default=Warning
 ```
 
 #### 4.4 WORKDIR — Working directory
@@ -449,10 +449,10 @@ COPY nginx.conf /etc/nginx/conf.d/default.conf
 
 ```dockerfile
 # Copy và đặt ownership ngay
-COPY --chown=nodejs:nodejs package*.json ./
+COPY --chown=appuser:appgroup ShopLite.Api/*.csproj ./ShopLite.Api/
 
 # Copy từ stage khác
-COPY --from=builder --chown=nodejs:nodejs /app/dist ./dist
+COPY --from=builder --chown=appuser:appgroup /app/publish .
 ```
 
 **ADD vs COPY:**
@@ -509,8 +509,8 @@ EXPOSE 53/udp
 #### 4.8 USER — Run as non-root
 
 ```dockerfile
-RUN addgroup -g 1001 -S nodejs && adduser -S -u 1001 nodejs
-USER nodejs
+RUN addgroup -g 1001 -S appgroup && adduser -S -u 1001 -G appgroup appuser
+USER appuser
 ```
 
 - **Security best practice**: chạy application dưới non-root user.
@@ -520,8 +520,8 @@ USER nodejs
 
 ```dockerfile
 # Tạo system user/group (không có shell, không có home directory login)
-RUN groupadd -r -g 1001 appgroup && \
-    useradd -r -u 1001 -g appgroup -s /bin/false appuser
+RUN addgroup -g 1001 -S appgroup && \
+    adduser -S -u 1001 -G appgroup appuser
 
 USER appuser
 ```
@@ -529,8 +529,8 @@ USER appuser
 #### 4.9 HEALTHCHECK — Container health monitoring
 
 ```dockerfile
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:3000/health || exit 1
+HEALTHCHECK --interval=30s --timeout=3s --start-period=15s --retries=3 \
+    CMD wget -qO- http://localhost:8080/health || exit 1
 ```
 
 - Định nghĩa cách Docker kiểm tra container có healthy không.
@@ -542,9 +542,9 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
 - Docker Swarm và Kubernetes dùng healthcheck để quyết định restart container.
 
 ```dockerfile
-# Dùng wget thay curl nếu image không có curl (ví dụ alpine)
-HEALTHCHECK --interval=30s --timeout=3s --start-period=10s \
-    CMD wget -qO- http://localhost:3000/health || exit 1
+# Dùng wget (Alpine không có curl mặc định)
+HEALTHCHECK --interval=30s --timeout=3s --start-period=15s \
+    CMD wget -qO- http://localhost:8080/health || exit 1
 ```
 
 #### 4.10 CMD và ENTRYPOINT — Default command
@@ -602,85 +602,87 @@ CMD ["node", "src/index.js"]
 
 ---
 
-### 5. Multi-stage Build cho Node.js Backend ShopLite
+### 5. Multi-stage Build cho .NET Backend ShopLite
 
-Multi-stage build giải quyết vấn đề: image production không cần devDependencies, build tools, test frameworks — nhưng quá trình build lại cần chúng.
+Multi-stage build giải quyết vấn đề: image production chỉ cần ASP.NET Core **runtime** (nhỏ hơn nhiều so với SDK), không cần build tools hay source code.
 
 ```dockerfile
 # ============================================================
-# Stage 1: Builder — install all deps, compile TypeScript
+# Stage 1: Builder — restore NuGet packages, compile, publish
 # ============================================================
-FROM node:18-alpine AS builder
+FROM mcr.microsoft.com/dotnet/sdk:8.0-alpine AS builder
 
-# Cài build tools nếu cần native modules (bcrypt, sharp, etc.)
-RUN apk add --no-cache python3 make g++
+WORKDIR /src
 
-WORKDIR /app
+# Copy project file trước để tận dụng layer cache
+# Chỉ re-run dotnet restore khi .csproj thay đổi
+COPY ShopLite.Api/*.csproj ./ShopLite.Api/
 
-# Copy dependency files trước để tận dụng layer cache
-# Chỉ re-run npm ci khi package.json hoặc package-lock.json thay đổi
-COPY package*.json ./
-COPY tsconfig*.json ./
+# dotnet restore: download NuGet packages
+# --locked-mode: dùng packages.lock.json để đảm bảo reproducible build
+RUN dotnet restore ./ShopLite.Api/ShopLite.Api.csproj --locked-mode
 
-# npm ci: nhanh hơn npm install, reproducible (dùng package-lock.json)
-# Cài đủ devDependencies để build
-RUN npm ci
+# Copy toàn bộ source code (sau restore để cache tầng restore)
+COPY ShopLite.Api/ ./ShopLite.Api/
 
-# Copy source code (sau npm ci để cache npm install layer)
-COPY src/ ./src/
-
-# Build TypeScript -> JavaScript
-RUN npm run build
-
-# Xóa devDependencies, chỉ giữ production deps
-RUN npm prune --production
+# Publish với cấu hình Release
+# -c Release: tối ưu hóa, bỏ debug symbols
+# -o /app/publish: output compiled artifacts vào đây
+# --no-restore: đã restore ở bước trên rồi
+# --self-contained false: dùng runtime từ base image (image nhỏ hơn)
+RUN dotnet publish ./ShopLite.Api/ShopLite.Api.csproj \
+    -c Release \
+    -o /app/publish \
+    --no-restore \
+    --self-contained false
 
 # ============================================================
-# Stage 2: Runner — chỉ chứa production code
+# Stage 2: Runner — chỉ chứa ASP.NET Core runtime + published app
 # ============================================================
-FROM node:18-alpine AS runner
+FROM mcr.microsoft.com/dotnet/aspnet:8.0-alpine AS runner
 
 # Tạo non-root user/group
-RUN addgroup -g 1001 -S nodejs && \
-    adduser -S -u 1001 -G nodejs nodejs
+RUN addgroup -g 1001 -S appgroup && \
+    adduser -S -u 1001 -G appgroup appuser
 
 WORKDIR /app
 
-# Set production environment
-ENV NODE_ENV=production
-ENV PORT=3000
+# ASPNETCORE_ENVIRONMENT: Production tắt detailed error pages, bật caching
+ENV ASPNETCORE_ENVIRONMENT=Production
+# ASPNETCORE_URLS: lắng nghe trên port 8080 (không dùng 80 vì cần root)
+ENV ASPNETCORE_URLS=http://+:8080
 
-# Copy chỉ những gì cần thiết từ builder stage
+# Copy published output từ builder stage
 # --chown: set ownership khi copy, không cần chmod riêng
-COPY --from=builder --chown=nodejs:nodejs /app/dist ./dist
-COPY --from=builder --chown=nodejs:nodejs /app/node_modules ./node_modules
-COPY --from=builder --chown=nodejs:nodejs /app/package.json ./
+COPY --from=builder --chown=appuser:appgroup /app/publish .
 
 # Chạy với non-root user
-USER nodejs
+USER appuser
 
 # Document port (không mở thực sự)
-EXPOSE 3000
+EXPOSE 8080
 
 # Health check — Docker tự động restart nếu unhealthy
-HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
-    CMD wget -qO- http://localhost:3000/health || exit 1
+HEALTHCHECK --interval=30s --timeout=3s --start-period=15s --retries=3 \
+    CMD wget -qO- http://localhost:8080/health || exit 1
 
-# Exec form để PID 1 = node process, signal handling đúng
-CMD ["node", "dist/index.js"]
+# Exec form: dotnet là PID 1, nhận SIGTERM trực tiếp
+# ASP.NET Core tự xử lý graceful shutdown khi nhận SIGTERM
+ENTRYPOINT ["dotnet", "ShopLite.Api.dll"]
 ```
 
-**Giải thích tại sao image giảm từ ~1 GB xuống ~150 MB:**
+**Giải thích tại sao image giảm từ ~400 MB xuống ~110 MB:**
 
 | Thành phần | Builder stage | Runner stage |
 |---|---|---|
-| node:18-alpine base | ~50 MB | ~50 MB |
-| devDependencies (jest, ts-node, eslint...) | ~300 MB | Không có |
-| TypeScript compiler | ~15 MB | Không có |
-| Source .ts files | ~2 MB | Không có |
-| Build artifacts (.js) | ~2 MB | ~2 MB |
-| production node_modules | ~80 MB | ~80 MB |
-| **Total** | **~450 MB** | **~132 MB** |
+| dotnet/sdk:8.0-alpine base | ~300 MB | Không dùng |
+| NuGet packages (restore) | ~80 MB | Không có |
+| Source code (.cs files) | ~2 MB | Không có |
+| dotnet/aspnet:8.0-alpine base | — | ~103 MB |
+| Published artifacts (.dll) | ~5 MB | ~5 MB |
+| **Total** | **~387 MB** | **~108 MB** |
+
+SDK (Roslyn compiler, MSBuild, build tools) chỉ cần trong builder stage. Runner stage chỉ cần `aspnet` runtime — nhỏ hơn `sdk` khoảng 3 lần.
 
 **Build và chạy:**
 
@@ -694,14 +696,40 @@ docker image ls shoplite-backend
 # Chạy container
 docker run -d \
   --name shoplite-backend \
-  -p 3000:3000 \
-  -e DATABASE_URL="postgresql://user:pass@postgres:5432/shoplite" \
-  -e REDIS_URL="redis://redis:6379" \
+  -p 8080:8080 \
+  -e ConnectionStrings__DefaultConnection="Host=postgres;Database=shoplite;Username=shoplite;Password=secret" \
+  -e ConnectionStrings__Redis="redis:6379" \
+  -e ASPNETCORE_ENVIRONMENT=Production \
   --network shoplite-net \
   shoplite-backend:v1.0.0
 
 # Verify health
 docker ps  # xem STATUS: Up X minutes (healthy)
+```
+
+**Với project có nhiều layers (.sln + nhiều .csproj):**
+
+```dockerfile
+FROM mcr.microsoft.com/dotnet/sdk:8.0-alpine AS builder
+
+WORKDIR /src
+
+# Copy solution và tất cả .csproj trước để restore hiệu quả
+COPY ShopLite.sln .
+COPY ShopLite.Api/*.csproj ./ShopLite.Api/
+COPY ShopLite.Domain/*.csproj ./ShopLite.Domain/
+COPY ShopLite.Infrastructure/*.csproj ./ShopLite.Infrastructure/
+
+RUN dotnet restore ShopLite.sln --locked-mode
+
+COPY . .
+
+# Publish chỉ project API (dependencies tự động được include)
+RUN dotnet publish ./ShopLite.Api/ShopLite.Api.csproj \
+    -c Release -o /app/publish --no-restore
+
+FROM mcr.microsoft.com/dotnet/aspnet:8.0-alpine AS runner
+# ... (phần còn lại giống ở trên)
 ```
 
 ---
@@ -801,32 +829,28 @@ docker run -d \
 **Tại sao quan trọng:**
 
 Khi chạy `docker build .`, Docker gửi toàn bộ directory (build context) tới daemon. Nếu không có `.dockerignore`:
-- `node_modules` (~500 MB) bị copy vào build context dù Dockerfile sẽ `RUN npm install` lại.
+- `bin/` và `obj/` (~100-500 MB) bị copy vào build context dù Docker sẽ build lại từ source.
 - `.git` directory (~50-200 MB) chứa toàn bộ lịch sử commit bị copy dù không cần.
 - `.env` files chứa secrets bị đưa vào build context (và có thể vào image).
 - Tốc độ build chậm vì phải transfer lượng data lớn.
 
-**File .dockerignore đầy đủ cho Node.js project:**
+**File .dockerignore đầy đủ cho .NET project:**
 
 ```
-# Dependencies (will be installed fresh)
-node_modules
-.pnp
-.pnp.js
+# Build artifacts — sẽ được build lại bên trong Docker
+bin/
+obj/
+publish/
 
-# Build artifacts (will be built in Docker)
-dist
-build
-.next
-out
-
-# Test artifacts
-coverage
-.nyc_output
-*.lcov
+# Visual Studio / JetBrains Rider artifacts
+.vs/
+.idea/
+*.user
+*.suo
+*.DotSettings.user
 
 # Git
-.git
+.git/
 .gitignore
 .gitattributes
 
@@ -839,37 +863,41 @@ Dockerfile.*
 .env
 .env.local
 .env.*.local
-.env.development
-.env.test
-.env.production
+appsettings.Development.json
+appsettings.Local.json
 
 # Editor/IDE files
-.vscode
-.idea
+.vscode/
 *.swp
-*.swo
 .DS_Store
 Thumbs.db
 
+# Test projects và artifacts
+**Tests/
+**Test/
+TestResults/
+coverage/
+*.trx
+*.coverage
+*.coveragexml
+
 # Logs
-logs
+logs/
 *.log
-npm-debug.log*
-yarn-debug.log*
 
 # Documentation
 *.md
-docs
+docs/
 
 # CI/CD configs
-.github
+.github/
 .gitlab-ci.yml
 .travis.yml
 Jenkinsfile
 
 # Misc
-.eslintcache
-.stylelintcache
+*.nupkg
+.packages/
 ```
 
 **Kiểm tra build context size:**
@@ -890,9 +918,10 @@ docker build . 2>&1 | head -5
 ```bash
 docker run -d \
   --name shoplite-backend \
-  -p 3000:3000 \
-  -e DATABASE_URL=postgres://user:pass@postgres:5432/shoplite \
-  -e REDIS_URL=redis://redis:6379 \
+  -p 8080:8080 \
+  -e ConnectionStrings__DefaultConnection="Host=postgres;Database=shoplite;Username=user;Password=pass" \
+  -e ConnectionStrings__Redis="redis:6379" \
+  -e ASPNETCORE_ENVIRONMENT=Production \
   -v /data/uploads:/app/uploads \
   --network shoplite-net \
   --restart unless-stopped \
@@ -1113,20 +1142,17 @@ docker volume prune
 #### 9.2 Bind Mounts (Khuyên dùng cho development hot-reload)
 
 ```bash
-# Mount current directory vào /app
+# Mount current directory vào /src (để dotnet watch detect thay đổi)
 docker run -d \
   --name shoplite-dev \
-  -p 3000:3000 \
-  -v $(pwd):/app \
-  -v /app/node_modules \
-  node:18-alpine \
-  npm run dev
+  -p 8080:8080 \
+  -v $(pwd):/src \
+  -e ASPNETCORE_ENVIRONMENT=Development \
+  -e DOTNET_USE_POLLING_FILE_WATCHER=true \
+  mcr.microsoft.com/dotnet/sdk:8.0-alpine \
+  dotnet watch run --project ShopLite.Api --no-launch-profile
 
-# Giải thích -v /app/node_modules:
-# Mount anonymous volume lên /app/node_modules
-# Ngăn node_modules trong container bị ghi đè bởi (trống) từ host
-
-# Read-only bind mount
+# Read-only bind mount (ví dụ: config file)
 docker run -d \
   --name nginx \
   -p 80:80 \
@@ -1137,8 +1163,8 @@ docker run -d \
 docker run -d \
   --name shoplite-dev \
   --user "$(id -u):$(id -g)" \
-  -v $(pwd):/app \
-  node:18-alpine
+  -v $(pwd):/src \
+  mcr.microsoft.com/dotnet/sdk:8.0-alpine
 ```
 
 #### 9.3 tmpfs Mounts (In-memory, ephemeral)
@@ -1399,13 +1425,13 @@ docker inspect shoplite-backend | jq '.[0].State'
 # Bước 3: Override entrypoint để explore image
 docker run -it --entrypoint /bin/sh shoplite-backend:v1.0.0
 # Trong shell, chạy tay command để xem lỗi:
-node dist/index.js
-# -> Error: Cannot find module './config' ...
+dotnet ShopLite.Api.dll
+# -> Unhandled exception: System.IO.FileNotFoundException: ...
 
-# Nếu image không có /bin/sh (distroless, scratch)
-docker run -it --entrypoint /bin/bash shoplite-backend:v1.0.0
-# hoặc dùng debug image
-docker run -it --entrypoint /bin/sh --pid=container:shoplite-backend alpine
+# Nếu image là Alpine (không có bash, chỉ có sh)
+docker run -it --entrypoint /bin/sh shoplite-backend:v1.0.0
+# hoặc dùng debug container share namespace
+docker run -it --pid=container:shoplite-backend --network=container:shoplite-backend alpine sh
 ```
 
 #### 12.2 OOMKilled — Out of Memory
@@ -1422,8 +1448,8 @@ docker stats --no-stream shoplite-backend
 # 1. Tăng memory limit
 docker update --memory="1g" shoplite-backend
 
-# 2. Tìm memory leak trong ứng dụng
-docker exec shoplite-backend node --max-old-space-size=512 dist/index.js
+# 2. Kiểm tra GC pressure trong .NET (xem dotnet-counters)
+docker exec shoplite-backend sh -c "dotnet-counters monitor --process-id 1"
 
 # 3. Xem top memory consumers
 docker exec shoplite-backend cat /proc/meminfo
@@ -1444,14 +1470,14 @@ docker exec shoplite-backend id
 docker exec shoplite-backend ls -la /app/uploads
 
 # Giải pháp 1: Fix quyền trong container (tạm thời)
-docker exec -u root shoplite-backend chown -R nodejs:nodejs /app/uploads
+docker exec -u root shoplite-backend chown -R appuser:appgroup /app/uploads
 
 # Giải pháp 2: Fix trong Dockerfile (permanent)
 # Thêm vào Dockerfile:
-# RUN mkdir -p /app/uploads && chown -R nodejs:nodejs /app/uploads
+# RUN mkdir -p /app/uploads && chown -R appuser:appgroup /app/uploads
 
 # Giải pháp 3: Fix quyền trên host khi dùng bind mount
-sudo chown -R 1001:1001 /data/uploads  # 1001 là UID của nodejs user trong container
+sudo chown -R 1001:1001 /data/uploads  # 1001 là UID của appuser trong container
 ```
 
 #### 12.4 Network Connectivity Issues
@@ -1501,9 +1527,9 @@ docker build --no-cache -t shoplite-backend:nocache .
 DOCKER_BUILDKIT=1 docker build -t shoplite-backend:v1.0.0 .
 
 # Kiểm tra image sau build
-docker run --rm shoplite-backend:v1.0.0 node --version
+docker run --rm shoplite-backend:v1.0.0 dotnet --info
 docker run --rm shoplite-backend:v1.0.0 ls -la /app
-docker run --rm shoplite-backend:v1.0.0 cat /app/package.json
+docker run --rm shoplite-backend:v1.0.0 dotnet ShopLite.Api.dll --help
 ```
 
 ---
@@ -1514,17 +1540,17 @@ docker run --rm shoplite-backend:v1.0.0 cat /app/package.json
 
 ```dockerfile
 # 1. Không chạy root
-USER nodejs
+USER appuser
 
 # 2. Scan image vulnerabilities
 # docker scout cves shoplite-backend:v1.0.0
 # trivy image shoplite-backend:v1.0.0
 
 # 3. Dùng specific base image versions
-FROM node:18.17.0-alpine3.18  # cụ thể hơn node:18-alpine
+FROM mcr.microsoft.com/dotnet/aspnet:8.0.8-alpine3.20  # cụ thể hơn aspnet:8.0-alpine
 
-# 4. Không copy .env vào image
-# .dockerignore phải có .env
+# 4. Không copy .env hay appsettings.Development.json vào image
+# .dockerignore phải có những file này
 
 # 5. Readonly filesystem nếu không cần ghi
 docker run --read-only --tmpfs /tmp shoplite-backend:v1.0.0
@@ -1554,14 +1580,14 @@ RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
 # 1. Luôn có HEALTHCHECK
 HEALTHCHECK --interval=30s --timeout=3s CMD curl -f http://localhost:3000/health || exit 1
 
-# 2. Graceful shutdown (exec form CMD)
-CMD ["node", "dist/index.js"]
+# 2. Graceful shutdown (exec form ENTRYPOINT)
+ENTRYPOINT ["dotnet", "ShopLite.Api.dll"]
 
-# 3. Handle signals trong application code
-process.on('SIGTERM', () => {
-  server.close(() => {
-    process.exit(0);
-  });
+# 3. ASP.NET Core tự xử lý graceful shutdown khi nhận SIGTERM
+# Cấu hình thời gian chờ drain requests trong Program.cs:
+builder.Services.Configure<HostOptions>(options =>
+{
+    options.ShutdownTimeout = TimeSpan.FromSeconds(30);
 });
 
 # 4. Restart policy

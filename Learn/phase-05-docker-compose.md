@@ -58,10 +58,11 @@ docker run -d \
   --name shoplite-backend \
   --network shoplite-backend-net \
   --network shoplite-frontend-net \
-  -p 3000:3000 \
-  -e DATABASE_URL=postgresql://shoplite:change-me-in-production@shoplite-postgres:5432/shoplite \
-  -e REDIS_URL=redis://shoplite-redis:6379 \
-  -e JWT_SECRET=your-secret \
+  -p 8080:8080 \
+  -e ConnectionStrings__DefaultConnection="Host=shoplite-postgres;Database=shoplite;Username=shoplite;Password=change-me-in-production" \
+  -e ConnectionStrings__Redis="shoplite-redis:6379" \
+  -e Jwt__Secret=your-secret \
+  -e ASPNETCORE_ENVIRONMENT=Production \
   --restart unless-stopped \
   shoplite-backend:latest
 
@@ -179,29 +180,29 @@ services:
         max-file: "3"
 
   # ─────────────────────────────────────────
-  # BACKEND SERVICE
+  # BACKEND SERVICE (ASP.NET Core / .NET 8)
   # ─────────────────────────────────────────
   backend:
     build:
       context: ./backend
       dockerfile: Dockerfile
-      target: production
+      target: runner
     image: shoplite-backend:latest
     container_name: shoplite-backend
     ports:
-      - "3000:3000"                # Expose API port
+      - "8080:8080"                # Expose API port (ASP.NET Core default)
     depends_on:
       postgres:
         condition: service_healthy # QUAN TRỌNG: phải đợi DB healthy
       redis:
         condition: service_healthy # QUAN TRỌNG: phải đợi Redis healthy
     environment:
-      # Các biến này được đọc từ file .env ở cùng thư mục
-      - DATABASE_URL=${DATABASE_URL}
-      - REDIS_URL=${REDIS_URL:-redis://redis:6379}  # có default value
-      - JWT_SECRET=${JWT_SECRET}
-      - NODE_ENV=${NODE_ENV:-production}
-      - PORT=${PORT:-3000}
+      # .NET dùng double underscore __ để phân cấp config
+      # ConnectionStrings__DefaultConnection = ConnectionStrings:DefaultConnection trong appsettings.json
+      - ConnectionStrings__DefaultConnection=${DATABASE_CONNECTION_STRING}
+      - ConnectionStrings__Redis=${REDIS_CONNECTION_STRING:-redis:6379}
+      - Jwt__Secret=${JWT_SECRET}
+      - ASPNETCORE_ENVIRONMENT=${ASPNETCORE_ENVIRONMENT:-Production}
     # Thay thế: dùng env_file để load toàn bộ file .env
     # env_file:
     #   - .env
@@ -210,11 +211,11 @@ services:
       - backend-net                # Để backend gọi postgres và redis
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/health"]
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
       interval: 15s
       timeout: 5s
       retries: 5
-      start_period: 30s            # Cho backend 30s để khởi động trước khi check
+      start_period: 30s            # Cho ASP.NET Core 30s để khởi động trước khi check
     deploy:
       resources:
         limits:
@@ -385,24 +386,23 @@ Lý do:
 # File này chứa giá trị thật - KHÔNG BAO GIỜ commit vào git
 # Mỗi developer có file .env riêng của mình
 
-# Database
-DATABASE_URL=postgresql://shoplite:password@postgres:5432/shoplite
+# Database (Connection string theo định dạng Npgsql)
+DATABASE_CONNECTION_STRING=Host=postgres;Database=shoplite;Username=shoplite;Password=change-me-in-production
 POSTGRES_DB=shoplite
 POSTGRES_USER=shoplite
 POSTGRES_PASSWORD=change-me-in-production
 
 # Redis
-REDIS_URL=redis://redis:6379
+REDIS_CONNECTION_STRING=redis:6379
 
 # Authentication
 JWT_SECRET=your-super-secret-jwt-key-here-minimum-32-chars
 
 # Application
-NODE_ENV=development
-PORT=3000
+ASPNETCORE_ENVIRONMENT=Development
 
-# Logging
-LOG_LEVEL=debug
+# Logging có thể cấu hình qua env var (double underscore cho nested config)
+# Logging__LogLevel__Default=Debug
 ```
 
 #### File .env.example (commit vào git)
@@ -413,25 +413,24 @@ LOG_LEVEL=debug
 # Hướng dẫn: copy file này thành .env và điền giá trị thật vào
 # cp .env.example .env
 
-# Database
-DATABASE_URL=postgresql://user:password@postgres:5432/dbname
+# Database (Connection string theo định dạng Npgsql)
+DATABASE_CONNECTION_STRING=Host=postgres;Database=shoplite;Username=shoplite;Password=change-me-in-production
 POSTGRES_DB=shoplite
 POSTGRES_USER=shoplite
 POSTGRES_PASSWORD=change-me-in-production
 
 # Redis
-REDIS_URL=redis://redis:6379
+REDIS_CONNECTION_STRING=redis:6379
 
 # Authentication
 # Tạo secret ngẫu nhiên: openssl rand -base64 32
 JWT_SECRET=generate-random-secret-here
 
 # Application
-NODE_ENV=development
-PORT=3000
+ASPNETCORE_ENVIRONMENT=Development
 
-# Logging
-LOG_LEVEL=info
+# Logging (override appsettings.json)
+# Logging__LogLevel__Default=Information
 ```
 
 #### Cách sử dụng biến môi trường trong Compose
@@ -440,9 +439,9 @@ LOG_LEVEL=info
 
 ```yaml
 environment:
-  - DATABASE_URL=${DATABASE_URL}
-  - REDIS_URL=${REDIS_URL}
-  - JWT_SECRET=${JWT_SECRET}
+  - ConnectionStrings__DefaultConnection=${DATABASE_CONNECTION_STRING}
+  - ConnectionStrings__Redis=${REDIS_CONNECTION_STRING}
+  - Jwt__Secret=${JWT_SECRET}
 ```
 
 Docker Compose tự động đọc file `.env` trong cùng thư mục với `docker-compose.yml`.
@@ -451,9 +450,9 @@ Docker Compose tự động đọc file `.env` trong cùng thư mục với `doc
 
 ```yaml
 environment:
-  - NODE_ENV=${NODE_ENV:-development}     # Nếu NODE_ENV không set, dùng "development"
-  - PORT=${PORT:-3000}                    # Nếu PORT không set, dùng 3000
-  - REDIS_URL=${REDIS_URL:-redis://redis:6379}
+  - ASPNETCORE_ENVIRONMENT=${ASPNETCORE_ENVIRONMENT:-Production}
+  - ConnectionStrings__Redis=${REDIS_CONNECTION_STRING:-redis:6379}
+  - Logging__LogLevel__Default=${LOG_LEVEL:-Warning}
 ```
 
 Cú pháp `${VAR:-default}` rất hữu ích để có giá trị fallback.
@@ -474,8 +473,8 @@ Khi dùng `env_file`, tất cả biến trong file sẽ được inject vào con
 
 ```yaml
 environment:
-  - NODE_ENV=production     # Giá trị này không nhạy cảm, có thể hard-code
-  - TZ=Asia/Ho_Chi_Minh     # Timezone
+  - ASPNETCORE_ENVIRONMENT=Production   # Giá trị này không nhạy cảm, có thể hard-code
+  - TZ=Asia/Ho_Chi_Minh                 # Timezone
 ```
 
 #### Bảo mật .env
@@ -602,19 +601,30 @@ test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000/health',
 
 Backend cần có endpoint `/health` trả về HTTP 200 khi healthy:
 
-```javascript
-// Trong Express app
-app.get('/health', async (req, res) => {
-  try {
-    // Kiểm tra database connection
-    await db.query('SELECT 1');
-    // Kiểm tra Redis connection
-    await redis.ping();
-    res.json({ status: 'healthy', timestamp: new Date().toISOString() });
-  } catch (error) {
-    res.status(503).json({ status: 'unhealthy', error: error.message });
-  }
+```csharp
+// Cách 1: Minimal API trong Program.cs
+app.MapGet("/health", async (AppDbContext db, IConnectionMultiplexer redis) =>
+{
+    try
+    {
+        await db.Database.ExecuteSqlRawAsync("SELECT 1");
+        await redis.GetDatabase().PingAsync();
+        return Results.Ok(new { status = "healthy", timestamp = DateTime.UtcNow });
+    }
+    catch (Exception ex)
+    {
+        return Results.Json(new { status = "unhealthy", error = ex.Message },
+            statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
 });
+
+// Cách 2: Built-in Health Checks middleware (khuyên dùng cho production)
+// Trong Program.cs:
+builder.Services.AddHealthChecks()
+    .AddNpgsql(builder.Configuration.GetConnectionString("DefaultConnection")!)
+    .AddRedis(builder.Configuration.GetConnectionString("Redis")!);
+
+app.MapHealthChecks("/health");
 ```
 
 #### Trạng thái healthcheck
@@ -650,12 +660,12 @@ services:
   backend:
     environment:
       # Dùng "postgres" (service name), không phải "localhost" hay "172.17.0.x"
-      - DATABASE_URL=postgresql://shoplite:password@postgres:5432/shoplite
-      #                                                ^^^^^^^^
-      #                                                Service name trong compose
-      - REDIS_URL=redis://redis:6379
-      #                    ^^^^^
-      #                    Service name trong compose
+      - ConnectionStrings__DefaultConnection=Host=postgres;Database=shoplite;Username=shoplite;Password=secret
+      #                                              ^^^^^^^^
+      #                                              Service name trong compose
+      - ConnectionStrings__Redis=redis:6379
+      #                          ^^^^^
+      #                          Service name trong compose
 ```
 
 Docker Compose tự động tạo DNS entries cho mỗi service trong network. Khi backend gọi `postgres:5432`, Docker DNS resolver sẽ resolve `postgres` thành IP của container đang chạy service đó.
@@ -774,14 +784,12 @@ services:
 services:
   backend:
     volumes:
-      - ./backend:/app          # Mount thư mục local vào container
-      - /app/node_modules       # Anonymous volume để "che" node_modules
+      - ./backend:/src          # Mount source code vào /src để dotnet watch detect thay đổi
+    environment:
+      - DOTNET_USE_POLLING_FILE_WATCHER=true  # Cần thiết vì inotify không hoạt động qua Docker volume
 ```
 
-Giải thích trick `/app/node_modules`:
-1. `./backend:/app` mount toàn bộ thư mục backend vào `/app` trong container
-2. Vấn đề: `node_modules` trên host (Windows/Mac) có thể không compatible với Linux container
-3. `- /app/node_modules` tạo anonymous volume che `node_modules` - container dùng node_modules riêng của nó, không bị ảnh hưởng bởi host's node_modules
+Với .NET không cần anonymous volume trick như Node.js. SDK stage tự quản lý build artifacts trong container, không bị ảnh hưởng bởi `bin/` và `obj/` trên host (đã ignore trong .dockerignore).
 
 #### Vòng đời của Volumes
 
@@ -814,9 +822,10 @@ docker compose down -v
 services:
   backend:
     volumes:
-      - ./backend:/app
-      - /app/node_modules
-    command: npm run dev   # Thay thế command từ base file
+      - ./backend:/src     # Mount source code để dotnet watch detect thay đổi
+    command: dotnet watch run --project ShopLite.Api --no-launch-profile
+    environment:
+      - DOTNET_USE_POLLING_FILE_WATCHER=true
 ```
 
 ---
@@ -911,14 +920,14 @@ docker compose logs -f backend frontend
 ```bash
 # ─── EXEC ────────────────────────────────────────────
 
-# Mở interactive shell trong container backend
-docker compose exec backend bash
-
-# Hoặc sh nếu image không có bash
+# Mở interactive shell trong container backend (Alpine image dùng sh, không có bash)
 docker compose exec backend sh
 
+# Xem thông tin .NET runtime trong container
+docker compose exec backend dotnet --info
+
 # Chạy command cụ thể trong container
-docker compose exec backend npm run lint
+docker compose exec backend dotnet --list-runtimes
 
 # Vào psql trong postgres container
 docker compose exec postgres psql -U shoplite -d shoplite
@@ -933,17 +942,17 @@ docker compose exec redis redis-cli KEYS "*"
 # ─── RUN ─────────────────────────────────────────────
 # run: tạo container MỚI (không phải container đang chạy) để chạy một lần
 
-# Chạy database migrations (tạo container mới, xóa sau khi xong)
-docker compose run --rm backend npm run migrate
+# Chạy EF Core migrations (tạo container mới, xóa sau khi xong)
+docker compose run --rm backend dotnet ef database update --project ShopLite.Api
 
 # Debug: mở shell trong container với entrypoint tùy chỉnh
-docker compose run --rm --entrypoint bash backend
+docker compose run --rm --entrypoint sh backend
 
 # Chạy tests
-docker compose run --rm backend npm test
+docker compose run --rm backend dotnet test
 
 # Tạo container mới với environment variable tùy chỉnh
-docker compose run --rm -e DEBUG=* backend npm run debug
+docker compose run --rm -e ASPNETCORE_ENVIRONMENT=Development backend dotnet ShopLite.Api.dll
 ```
 
 #### Quản lý images và builds
@@ -1023,9 +1032,9 @@ services:
     build:
       context: ./backend
     environment:
-      - NODE_ENV=${NODE_ENV:-production}
-      - DATABASE_URL=${DATABASE_URL}
-      - JWT_SECRET=${JWT_SECRET}
+      - ASPNETCORE_ENVIRONMENT=${ASPNETCORE_ENVIRONMENT:-Production}
+      - ConnectionStrings__DefaultConnection=${DATABASE_CONNECTION_STRING}
+      - Jwt__Secret=${JWT_SECRET}
     networks:
       - frontend-net
       - backend-net
@@ -1066,17 +1075,17 @@ volumes:
 services:
   backend:
     build:
-      target: development    # Dùng development stage của Dockerfile
+      target: builder        # Dùng SDK stage để có dotnet watch
     volumes:
-      - ./backend:/app       # Bind mount code để hot reload
-      - /app/node_modules    # Giữ node_modules của container
-    command: npm run dev     # Override command để dùng nodemon
+      - ./backend:/src       # Bind mount source code để hot reload
+    command: dotnet watch run --project ShopLite.Api --no-launch-profile
     environment:
-      - NODE_ENV=development
-      - DEBUG=*              # Bật tất cả debug logs
-      - LOG_LEVEL=debug
+      - ASPNETCORE_ENVIRONMENT=Development
+      - DOTNET_USE_POLLING_FILE_WATCHER=true  # Cần thiết cho file change detection qua Docker volume
+      - ASPNETCORE_URLS=http://+:8080
+      - Logging__LogLevel__Default=Debug
     ports:
-      - "9229:9229"          # Node.js debugger port (để attach VS Code debugger)
+      - "8080:8080"
 
   frontend:
     build:
@@ -1108,8 +1117,8 @@ services:
   backend:
     restart: unless-stopped
     environment:
-      - NODE_ENV=production
-      - LOG_LEVEL=warn
+      - ASPNETCORE_ENVIRONMENT=Production
+      - Logging__LogLevel__Default=Warning
     deploy:
       resources:
         limits:
@@ -1183,26 +1192,26 @@ Khi merge files, Docker Compose sử dụng rules sau:
 services:
   backend:
     ports:
-      - "3000:3000"
+      - "8080:8080"
     environment:
-      - NODE_ENV=production
+      - ASPNETCORE_ENVIRONMENT=Production
 
 # Override file
 services:
   backend:
     ports:
-      - "9229:9229"     # Được THÊM VÀO, không replace
+      - "5005:5005"     # Được THÊM VÀO, không replace (ví dụ: debugger port)
     environment:
-      - NODE_ENV=development   # Override giá trị NODE_ENV
+      - ASPNETCORE_ENVIRONMENT=Development   # Override giá trị
 
 # Result sau merge:
 services:
   backend:
     ports:
-      - "3000:3000"
-      - "9229:9229"     # Cả hai ports
+      - "8080:8080"
+      - "5005:5005"     # Cả hai ports
     environment:
-      - NODE_ENV=development   # Giá trị mới nhất
+      - ASPNETCORE_ENVIRONMENT=Development   # Giá trị mới nhất
 ```
 
 ---
@@ -1319,27 +1328,28 @@ Migrations là scripts thay đổi database schema (tạo bảng, thêm cột, e
 ```yaml
 services:
   backend:
-    command: sh -c "npm run migrate && npm start"
-    # Chạy migrations rồi mới start application
+    # Chạy EF Core migrations rồi mới start application
     # Vấn đề: nếu migrate fail, container cũng fail và restart
+    command: sh -c "dotnet ef database update --project ShopLite.Api && dotnet ShopLite.Api.dll"
 ```
 
-Đơn giản nhưng có nhược điểm: mỗi lần restart container, migrations chạy lại. Cần đảm bảo migrations là idempotent (chạy nhiều lần vẫn cho kết quả giống nhau).
+Đơn giản nhưng có nhược điểm: mỗi lần restart container, migrations chạy lại. EF Core xử lý tốt vì chỉ apply migrations chưa được apply (idempotent).
 
-#### Pattern 2: Init Container
+#### Pattern 2: Init Container (khuyên dùng)
 
 ```yaml
 services:
-  # Container chỉ chạy migrations rồi exit
+  # Container chỉ chạy EF Core migrations rồi exit
   migrate:
     image: shoplite-backend:latest    # Dùng cùng image với backend
-    command: npm run migrate
+    command: dotnet ef database update --project ShopLite.Api
     depends_on:
       postgres:
         condition: service_healthy
     restart: "no"                     # Không restart sau khi xong
     environment:
-      - DATABASE_URL=${DATABASE_URL}
+      - ConnectionStrings__DefaultConnection=${DATABASE_CONNECTION_STRING}
+      - ASPNETCORE_ENVIRONMENT=Production
 
   # Backend chỉ start sau khi migrate hoàn thành thành công
   backend:
@@ -1350,8 +1360,8 @@ services:
       redis:
         condition: service_healthy
     environment:
-      - DATABASE_URL=${DATABASE_URL}
-      - REDIS_URL=${REDIS_URL}
+      - ConnectionStrings__DefaultConnection=${DATABASE_CONNECTION_STRING}
+      - ConnectionStrings__Redis=${REDIS_CONNECTION_STRING:-redis:6379}
 ```
 
 Pattern này tốt hơn vì:
@@ -1362,14 +1372,14 @@ Pattern này tốt hơn vì:
 #### Pattern 3: Chạy migrations thủ công
 
 ```bash
-# Chạy migrations khi cần (trước deploy)
-docker compose run --rm backend npm run migrate
+# Chạy EF Core migrations khi cần (trước deploy)
+docker compose run --rm backend dotnet ef database update --project ShopLite.Api
 
-# Hoặc rollback
-docker compose run --rm backend npm run migrate:rollback
+# Rollback về migration cụ thể
+docker compose run --rm backend dotnet ef database update PreviousMigrationName --project ShopLite.Api
 
-# Xem trạng thái migrations
-docker compose run --rm backend npm run migrate:status
+# Xem danh sách migrations và trạng thái applied/pending
+docker compose run --rm backend dotnet ef migrations list --project ShopLite.Api
 ```
 
 #### Seeding Database cho Development
@@ -1378,7 +1388,7 @@ docker compose run --rm backend npm run migrate:status
 services:
   seed:
     image: shoplite-backend:latest
-    command: npm run seed
+    command: dotnet run --project ShopLite.Api -- --seed
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -1442,7 +1452,7 @@ Lần đầu tiên có thể mất 3-5 phút để pull images.
     docker compose ps
 
     # Đợi tất cả services healthy, sau đó:
-    curl http://localhost:3000/health
+    curl http://localhost:8080/health
 
     # Mở trình duyệt
     open http://localhost       # Mac
@@ -1452,7 +1462,7 @@ Lần đầu tiên có thể mất 3-5 phút để pull images.
 
 Bạn sẽ thấy:
 - `docker compose ps` hiện tất cả services với status `(healthy)`
-- `curl http://localhost:3000/health` trả về `{"status":"healthy"}`
+- `curl http://localhost:8080/health` trả về `{"status":"healthy"}`
 - Trình duyệt mở `http://localhost` hiển thị trang chủ ShopLite
 ```
 
@@ -1469,7 +1479,7 @@ docker compose logs -f backend    # Theo dõi logs backend
 
 # ─── DEBUG ─────────────────────────────────────────────
 docker compose logs -f            # Xem tất cả logs
-docker compose exec backend bash  # Vào shell backend
+docker compose exec backend sh    # Vào shell backend (Alpine dùng sh)
 docker compose exec postgres psql -U shoplite  # Vào psql
 docker compose exec redis redis-cli            # Vào Redis CLI
 
@@ -1479,7 +1489,7 @@ docker compose build --no-cache backend  # Full rebuild backend
 
 # ─── MAINTENANCE ───────────────────────────────────────
 docker compose config             # Xem config đã resolve
-docker compose run --rm backend npm run migrate   # Chạy migrations
+docker compose run --rm backend dotnet ef database update  # EF Core migrations
 docker compose down -v            # Xóa cả data (fresh start)
 
 # ─── TROUBLESHOOTING ───────────────────────────────────

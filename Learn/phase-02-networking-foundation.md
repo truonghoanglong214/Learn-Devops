@@ -206,7 +206,8 @@ Port là số 16-bit (1–65535) xác định service/ứng dụng cụ thể tr
 | 53    | TCP/UDP  | DNS                 | UDP thường, TCP cho zone transfer   |
 | 80    | TCP      | HTTP                | Web không mã hóa                   |
 | 443   | TCP      | HTTPS               | Web mã hóa TLS                     |
-| 3000  | TCP      | Node.js / React Dev | Dev server, Next.js, Express       |
+| 5000  | TCP      | ASP.NET Core HTTP   | .NET dev server, default HTTP port |
+| 5001  | TCP      | ASP.NET Core HTTPS  | .NET dev server, default HTTPS port|
 | 3306  | TCP      | MySQL               | Database                           |
 | 5432  | TCP      | PostgreSQL          | Database ShopLite dùng             |
 | 5672  | TCP      | RabbitMQ            | AMQP message broker                |
@@ -1494,7 +1495,7 @@ Internet (Public)
 |  |  +--+--+    | |
 |  |  |     |    | |
 |  | +--+  +--+  | |
-|  | |FE|  |BE|  | |  <-- Frontend :3000, Backend :8000
+|  | |FE|  |BE|  | |  <-- Frontend :3000, Backend :8080 (ASP.NET Core)
 |  | |:3|  |:8|  | |      Không expose ra host
 |  | +--+  +--+  | |
 |  |       |     | |
@@ -1538,10 +1539,12 @@ services:
   backend:
     build: ./backend
     expose:
-      - "8000"
+      - "8080"
     environment:
-      - DATABASE_URL=postgresql://user:pass@postgres:5432/shoplite
-      - REDIS_URL=redis://redis:6379
+      - ASPNETCORE_ENVIRONMENT=Production
+      - ASPNETCORE_URLS=http://+:8080
+      - ConnectionStrings__Default=Host=postgres;Port=5432;Database=shoplite;Username=user;Password=pass
+      - ConnectionStrings__Redis=redis:6379
     networks:
       - shoplite-net
     depends_on:
@@ -1603,7 +1606,7 @@ server {
 
     # API routes
     location /api/ {
-        proxy_pass         http://backend:8000;
+        proxy_pass         http://backend:8080;
         proxy_set_header   Host $host;
         proxy_set_header   X-Real-IP $remote_addr;
         proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -1683,16 +1686,28 @@ upstream backend {
 }
 ```
 
-**Health Check Endpoint chuẩn:**
+**Health Check Endpoint chuẩn (ASP.NET Core):**
+
+ASP.NET Core có built-in health checks qua `Microsoft.Extensions.Diagnostics.HealthChecks`:
 ```json
 GET /health
 {
-  "status": "healthy",
-  "database": "connected",
-  "redis": "connected",
-  "version": "1.2.3",
-  "uptime": 3600
+  "status": "Healthy",
+  "totalDuration": "00:00:00.0123456",
+  "entries": {
+    "database": { "status": "Healthy", "duration": "00:00:00.0050000" },
+    "redis":    { "status": "Healthy", "duration": "00:00:00.0020000" }
+  }
 }
+```
+
+Cấu hình trong `Program.cs`:
+```csharp
+builder.Services.AddHealthChecks()
+    .AddNpgsql(connectionString, name: "database")
+    .AddRedis(redisConnection, name: "redis");
+
+app.MapHealthChecks("/health");
 ```
 
 ---

@@ -547,7 +547,7 @@ aws ec2 authorize-security-group-ingress \
   --protocol tcp --port 443 \
   --cidr 0.0.0.0/0
 
-# Port 8080 cho Node.js app (chỉ cần nếu không dùng Nginx)
+# Port 8080 cho .NET app (chỉ cần nếu không dùng Nginx)
 aws ec2 authorize-security-group-ingress \
   --group-id $SG_EC2 \
   --protocol tcp --port 8080 \
@@ -1211,21 +1211,20 @@ cd shoplite
 
 # Tạo .env production
 cat > .env.production << 'EOF'
-NODE_ENV=production
-PORT=8080
+ASPNETCORE_ENVIRONMENT=Production
+ASPNETCORE_URLS=http://+:8080
 
-DATABASE_URL=postgresql://shopliteadmin:PASSWORD@RDS_ENDPOINT:5432/shoplite?sslmode=require
-REDIS_URL=redis://localhost:6379
+ConnectionStrings__DefaultConnection=Host=RDS_ENDPOINT;Port=5432;Database=shoplite;Username=shopliteadmin;Password=PASSWORD;SSL Mode=Require
+ConnectionStrings__Redis=localhost:6379
 
-JWT_SECRET=your-super-secret-jwt-key-change-this
-JWT_EXPIRES_IN=7d
+JwtSettings__Secret=your-super-secret-jwt-key-change-this
+JwtSettings__ExpiresInDays=7
 
-S3_BUCKET=shoplite-assets-unique-name
-S3_REGION=ap-southeast-1
-AWS_ACCESS_KEY_ID=  # để trống nếu dùng IAM Role
-AWS_SECRET_ACCESS_KEY=  # để trống nếu dùng IAM Role
+S3__BucketName=shoplite-assets-unique-name
+S3__Region=ap-southeast-1
+# AWS_ACCESS_KEY_ID và AWS_SECRET_ACCESS_KEY: để trống nếu dùng IAM Role
 
-FRONTEND_URL=https://shoplite.com
+App__FrontendUrl=https://shoplite.com
 EOF
 ```
 
@@ -1241,20 +1240,19 @@ server {
     listen 80;
     server_name shoplite.com www.shoplite.com;
 
-    # API
+    # API — proxy đến .NET backend (ASP.NET Core chạy port 8080)
     location /api/ {
         proxy_pass http://localhost:8080;
         proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection 'upgrade';
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_cache_bypass $http_upgrade;
+        # Cần thiết để ASP.NET Core nhận đúng scheme khi dùng HTTPS termination tại Nginx
+        proxy_set_header X-Forwarded-Host $host;
     }
 
-    # Frontend static files
+    # Frontend static files (Blazor/React/Angular build output)
     location / {
         root /home/ubuntu/shoplite/frontend/dist;
         try_files $uri $uri/ /index.html;
@@ -1266,7 +1264,7 @@ server {
         }
     }
 
-    # Health check
+    # Health check endpoint (.NET built-in)
     location /health {
         proxy_pass http://localhost:8080/health;
     }
@@ -1290,13 +1288,13 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 # Verify containers running
 docker compose ps
 
-# Chạy migrations
-docker compose exec backend npm run db:migrate
+# Chạy migrations (EF Core)
+docker compose exec backend dotnet ef database update
 
 # Seed initial data (nếu cần)
-docker compose exec backend npm run db:seed
+docker compose exec backend dotnet run --project . -- --seed
 
-# Xem logs
+# Xem logs (.NET app log ra stdout/stderr, Docker capture tự động)
 docker compose logs -f backend
 ```
 

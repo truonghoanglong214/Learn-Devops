@@ -529,45 +529,51 @@ repos:
       - id: check-yaml
       - id: check-json
 
-  - repo: https://github.com/psf/black
-    rev: 23.3.0
+  - repo: local
     hooks:
-      - id: black  # Python formatter
+      - id: dotnet-format
+        name: dotnet format
+        entry: dotnet format --verify-no-changes
+        language: system
+        pass_filenames: false
 
-  - repo: https://github.com/pycqa/flake8
-    rev: 6.0.0
-    hooks:
-      - id: flake8  # Python linter
+      - id: dotnet-build
+        name: dotnet build
+        entry: dotnet build --no-restore -warnaserror
+        language: system
+        pass_filenames: false
 ```
 
 #### 3.3 Build (Xây dựng)
 
-**Công cụ:** Docker, npm/yarn, Maven/Gradle, webpack, GitHub Actions
+**Công cụ:** Docker, dotnet CLI, MSBuild, GitHub Actions
 
 **Docker build process:**
 
 ```dockerfile
-# Dockerfile cho ShopLite Backend (Node.js)
+# Dockerfile cho ShopLite Backend (.NET 8)
 # Multi-stage build để giảm image size
 
 # Stage 1: Build
-FROM node:20-alpine AS builder
+FROM mcr.microsoft.com/dotnet/sdk:8.0 AS builder
 WORKDIR /app
-COPY package*.json ./
-RUN npm ci --only=production  # Chỉ install production deps
+COPY *.csproj ./
+RUN dotnet restore
+
+COPY . .
+RUN dotnet publish -c Release -o /app/publish
 
 # Stage 2: Runtime
-FROM node:20-alpine AS runtime
+FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS runtime
 WORKDIR /app
-COPY --from=builder /app/node_modules ./node_modules
-COPY . .
+COPY --from=builder /app/publish .
 
 # Chạy với non-root user (security best practice)
-RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+RUN addgroup -S appgroup && adduser --no-create-home -S appuser -G appgroup
 USER appuser
 
-EXPOSE 3000
-CMD ["node", "src/server.js"]
+EXPOSE 8080
+CMD ["dotnet", "ShopLite.dll"]
 ```
 
 **Build artifacts và versioning:**
@@ -586,7 +592,7 @@ docker build -t shoplite-backend:1.2.3-$(git rev-parse --short HEAD) .
 
 #### 3.4 Test (Kiểm thử)
 
-**Công cụ:** Jest, Pytest, Cypress, k6, OWASP ZAP
+**Công cụ:** xUnit, NUnit, Playwright, k6, OWASP ZAP
 
 **Testing Pyramid — Chiến lược test:**
 
@@ -605,48 +611,70 @@ docker build -t shoplite-backend:1.2.3-$(git rev-parse --short HEAD) .
 
 **Ví dụ Unit Test cho API endpoint:**
 
-```javascript
-// tests/unit/cart.test.js
-const { calculateDiscount } = require('../../src/utils/cart');
+```csharp
+// tests/unit/CartTests.cs
+using Xunit;
+using ShopLite.Utils;
 
-describe('calculateDiscount', () => {
-  test('áp dụng 10% discount cho đơn hàng > 500k', () => {
-    const result = calculateDiscount(600000);
-    expect(result).toBe(60000);
-  });
+public class CartTests
+{
+    [Fact]
+    public void CalculateDiscount_OrderOver500k_Returns10Percent()
+    {
+        var result = CartUtils.CalculateDiscount(600000);
+        Assert.Equal(60000, result);
+    }
 
-  test('không áp dụng discount cho đơn hàng <= 500k', () => {
-    const result = calculateDiscount(400000);
-    expect(result).toBe(0);
-  });
+    [Fact]
+    public void CalculateDiscount_OrderUnder500k_ReturnsZero()
+    {
+        var result = CartUtils.CalculateDiscount(400000);
+        Assert.Equal(0, result);
+    }
 
-  test('throw error nếu amount âm', () => {
-    expect(() => calculateDiscount(-100)).toThrow('Amount must be positive');
-  });
-});
+    [Fact]
+    public void CalculateDiscount_NegativeAmount_ThrowsArgumentException()
+    {
+        Assert.Throws<ArgumentException>(
+            () => CartUtils.CalculateDiscount(-100));
+    }
+}
 ```
 
 **Ví dụ Integration Test:**
 
-```python
-# tests/integration/test_order_api.py
-import pytest
-from httpx import AsyncClient
-from app.main import app
+```csharp
+// tests/integration/OrderApiTests.cs
+using System.Net;
+using System.Net.Http.Json;
+using Microsoft.AspNetCore.Mvc.Testing;
+using Xunit;
 
-@pytest.mark.asyncio
-async def test_create_order_success():
-    async with AsyncClient(app=app, base_url="http://test") as client:
-        response = await client.post("/api/orders", json={
-            "user_id": 1,
-            "items": [{"product_id": 5, "quantity": 2}],
-            "payment_method": "credit_card"
-        })
-    
-    assert response.status_code == 201
-    data = response.json()
-    assert "order_id" in data
-    assert data["status"] == "pending"
+public class OrderApiTests : IClassFixture<WebApplicationFactory<Program>>
+{
+    private readonly HttpClient _client;
+
+    public OrderApiTests(WebApplicationFactory<Program> factory)
+    {
+        _client = factory.CreateClient();
+    }
+
+    [Fact]
+    public async Task CreateOrder_ValidRequest_Returns201()
+    {
+        var response = await _client.PostAsJsonAsync("/api/orders", new
+        {
+            UserId = 1,
+            Items = new[] { new { ProductId = 5, Quantity = 2 } },
+            PaymentMethod = "credit_card"
+        });
+
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+        var data = await response.Content.ReadFromJsonAsync<OrderResponse>();
+        Assert.NotNull(data?.OrderId);
+        Assert.Equal("pending", data?.Status);
+    }
+}
 ```
 
 **Load Testing với k6:**
@@ -772,19 +800,19 @@ spec:
         - name: backend
           image: shoplite-backend:1.2.3
           ports:
-            - containerPort: 3000
+            - containerPort: 8080
           # Kiểm tra app có ready nhận traffic chưa
           readinessProbe:
             httpGet:
               path: /health/ready
-              port: 3000
+              port: 8080
             initialDelaySeconds: 10
             periodSeconds: 5
           # Kiểm tra app có còn sống không
           livenessProbe:
             httpGet:
               path: /health/live
-              port: 3000
+              port: 8080
             initialDelaySeconds: 30
             periodSeconds: 10
           resources:
@@ -915,7 +943,7 @@ groups:
                     │ HTTP/REST API
 ┌───────────────────▼─────────────────────────┐
 │  Tier 2: Application/Logic Layer (Backend)  │
-│  Node.js, Python/FastAPI, Java/Spring       │
+│  ASP.NET Core (.NET 8), C#                  │
 │  Business rules, validation, orchestration  │
 └───────────────────┬─────────────────────────┘
                     │ SQL / ORM
@@ -999,11 +1027,11 @@ Browser
 │  - Checkout flow         │
 └─────────────┬────────────┘
               │ REST API (JSON)
-              │ Port 3000
+              │ Port 8080
               ▼
 ┌──────────────────────────┐
-│  Backend (Node.js/       │  ← Tier 2: Business Logic
-│  FastAPI)                │    Chạy trên App Server
+│  Backend (ASP.NET Core)  │  ← Tier 2: Business Logic
+│  .NET 8                  │    Chạy trên App Server
 │  - /api/products         │    Business rules
 │  - /api/orders           │    Authentication
 │  - /api/auth             │    Validation
@@ -1139,22 +1167,18 @@ curl -fsSL https://get.docker.com | sh
 sudo usermod -aG docker $USER
 newgrp docker
 
-# Cài Node.js 20 LTS qua nvm
-curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.5/install.sh | bash
-source ~/.bashrc
-nvm install 20
-nvm use 20
-nvm alias default 20
-
-# Cài Python 3.11
-sudo apt install -y python3.11 python3.11-venv python3-pip
+# Cài .NET 8 SDK
+wget https://packages.microsoft.com/config/ubuntu/22.04/packages-microsoft-prod.deb \
+  -O packages-microsoft-prod.deb
+sudo dpkg -i packages-microsoft-prod.deb
+rm packages-microsoft-prod.deb
+sudo apt update && sudo apt install -y dotnet-sdk-8.0
 
 # Verify
-uname -a          # Linux kernel version
-lsb_release -a    # Ubuntu version
-docker --version  # Docker version
-node --version    # Node.js version
-python3 --version # Python version
+uname -a           # Linux kernel version
+lsb_release -a     # Ubuntu version
+docker --version   # Docker version
+dotnet --version   # .NET SDK version
 ```
 
 #### 5.2 Phương án B: VirtualBox Ubuntu Server
@@ -1273,9 +1297,10 @@ Git & Code Quality:
 Languages:
 ├── YAML (redhat.vscode-yaml)
 │   → Validate YAML, schema support
-├── Python (ms-python.python)
-├── ESLint (dbaeumer.vscode-eslint)
-└── Prettier (esbenp.prettier-vscode)
+├── C# Dev Kit (ms-dotnettools.csdevkit)
+│   → Full C# development support (IntelliSense, debug, test)
+└── .NET Install Tool (ms-dotnettools.vscode-dotnet-runtime)
+    → Manage .NET runtime versions
 
 Productivity:
 ├── Thunder Client (rangav.vscode-thunder-client)
@@ -1296,8 +1321,8 @@ code --install-extension ms-kubernetes-tools.vscode-kubernetes-tools
 code --install-extension ms-azuretools.vscode-docker
 code --install-extension eamodio.gitlens
 code --install-extension redhat.vscode-yaml
-code --install-extension ms-python.python
-code --install-extension dbaeumer.vscode-eslint
+code --install-extension ms-dotnettools.csdevkit
+code --install-extension ms-dotnettools.vscode-dotnet-runtime
 code --install-extension rangav.vscode-thunder-client
 ```
 
@@ -1328,14 +1353,8 @@ docker --version
 docker run hello-world
 # → Hello from Docker!
 
-node --version
-# → v20.x.x
-
-npm --version
-# → 10.x.x
-
-python3 --version
-# → Python 3.11.x
+dotnet --version
+# → 8.x.x
 
 git --version
 # → git version 2.43.x
@@ -1377,8 +1396,8 @@ ShopLite System Overview
           │            │            │
    ┌──────▼──┐  ┌──────▼──┐  ┌─────▼───┐
    │Backend   │  │Backend   │  │Backend  │   App Replicas
-   │(Node.js) │  │(Node.js) │  │(Node.js)│   Horizontal
-   │:3000     │  │:3000     │  │:3000    │   Scaling
+   │(ASP.NET) │  │(ASP.NET) │  │(ASP.NET)│   Horizontal
+   │:8080     │  │:8080     │  │:8080    │   Scaling
    └──────────┘  └──────────┘  └─────────┘
                        │
           ┌────────────┼────────────┐
@@ -1441,14 +1460,14 @@ const addToCart = async (productId, quantity) => {
 
 ```
 Backend Stack:
-├── Node.js 20 LTS
-├── Express.js 4.x (HTTP framework)
-├── Sequelize (PostgreSQL ORM)
-├── ioredis (Redis client)
-├── jsonwebtoken (JWT auth)
-├── bcrypt (password hashing)
-├── Joi (input validation)
-└── Winston (structured logging)
+├── .NET 8 (ASP.NET Core)
+├── ASP.NET Core Web API (HTTP framework)
+├── Entity Framework Core (PostgreSQL ORM)
+├── StackExchange.Redis (Redis client)
+├── Microsoft.AspNetCore.Authentication.JwtBearer (JWT auth)
+├── BCrypt.Net-Next (password hashing)
+├── FluentValidation (input validation)
+└── Serilog (structured logging)
 
 API Endpoints:
 ├── POST   /api/auth/login
@@ -1565,7 +1584,7 @@ Hãy trace một request "GET /api/products?page=1" từ đầu đến cuối:
 3. Load Balancer (Nginx)
    Nhận request, health check backends
    → Chọn backend instance ít tải nhất (round-robin/least-conn)
-   → Forward đến 10.0.1.5:3000
+   → Forward đến 10.0.1.5:8080
 
 4. Backend (Node.js Express)
    a. Middleware stack:
